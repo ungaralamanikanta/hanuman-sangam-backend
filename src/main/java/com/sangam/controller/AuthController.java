@@ -19,11 +19,11 @@ import java.util.Map;
 // explicitly. Add your production domain here when deploying.
 @CrossOrigin(
     origins = {
+        "https://your-site-name.netlify.app",   // ✅ ADD THIS
         "http://localhost:8081",
         "http://localhost:8080",
         "http://127.0.0.1:8081",
-        "http://127.0.0.1:8080",
-        "null"   // ← "null" origin is what browsers send for file:// pages
+        "http://127.0.0.1:8080"
     },
     allowedHeaders = "*",
     methods = {
@@ -33,7 +33,7 @@ import java.util.Map;
         RequestMethod.DELETE,
         RequestMethod.OPTIONS
     },
-    allowCredentials = "false"
+    allowCredentials = "true"
 )
 public class AuthController {
 

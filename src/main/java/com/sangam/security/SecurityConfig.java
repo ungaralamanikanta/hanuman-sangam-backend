@@ -15,6 +15,7 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.util.Arrays;
 import java.util.List;
 
 @Configuration
@@ -36,7 +37,6 @@ public class SecurityConfig {
             .formLogin(form -> form.disable())
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-
                 // ── Public: no token needed ──────────────────────────────────
                 .requestMatchers("/api/auth/**").permitAll()
 
@@ -72,21 +72,37 @@ public class SecurityConfig {
     }
 
     @Bean
-public CorsConfigurationSource corsConfigurationSource() {
-    CorsConfiguration config = new CorsConfiguration();
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration config = new CorsConfiguration();
 
-    // ✅ Replace with your Netlify URL
-    config.setAllowedOrigins(List.of(
-        "https://your-site-name.netlify.app"
-    ));
+        config.setAllowedOrigins(Arrays.asList(
+            "https://hanuman-sangam.netlify.app",   // ✅ your Netlify frontend
+            "http://localhost:3000",                 // ✅ local dev (React)
+            "http://localhost:5500",                 // ✅ local dev (Live Server / plain HTML)
+            "http://127.0.0.1:5500"                  // ✅ local dev (VS Code Live Server)
+        ));
 
-    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-    config.setAllowedHeaders(List.of("*"));
+        config.setAllowedMethods(Arrays.asList(
+            "GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"
+        ));
 
-    config.setAllowCredentials(true); // ✅ now safe
+        config.setAllowedHeaders(Arrays.asList(
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "Origin",
+            "X-Requested-With"
+        ));
 
-    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-    source.registerCorsConfiguration("/**", config);
-    return source;
-}
+        config.setExposedHeaders(List.of(
+            "Authorization"   // ✅ allows frontend to read JWT from response header if needed
+        ));
+
+        config.setAllowCredentials(true);
+        config.setMaxAge(3600L); // ✅ cache preflight for 1 hour
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", config);
+        return source;
+    }
 }

@@ -15,6 +15,7 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.util.Arrays;
 import java.util.List;
 
 @Configuration
@@ -28,7 +29,7 @@ public class SecurityConfig {
     }
 
     // ===============================
-    // 🔐 SECURITY FILTER
+    // 🔐 SECURITY FILTER CHAIN
     // ===============================
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
@@ -41,20 +42,24 @@ public class SecurityConfig {
 
             .authorizeHttpRequests(auth -> auth
 
-                // ✅ PUBLIC APIs
+                // ✅ PUBLIC APIs — No token needed
                 .requestMatchers("/api/auth/**").permitAll()
                 .requestMatchers("/api/admin/stats").permitAll()
                 .requestMatchers("/api/admin/announcements").permitAll()
 
-                // 🔒 ADMIN
+                // ✅ OPTIONS preflight — MUST be permitted for CORS to work
+                .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
+
+                // 🔒 ADMIN only
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
 
-                // 🔒 MEMBER
+                // 🔒 MEMBER only
                 .requestMatchers("/api/member/**").hasRole("MEMBER")
 
-                // 🌐 STATIC (if needed)
-                .requestMatchers("/", "/*.html", "/css/**", "/js/**").permitAll()
+                // 🌐 STATIC FILES
+                .requestMatchers("/", "/*.html", "/css/**", "/js/**", "/images/**").permitAll()
 
+                // 🔒 Everything else requires authentication
                 .anyRequest().authenticated()
             )
 
@@ -81,43 +86,52 @@ public class SecurityConfig {
     }
 
     // ===============================
-    // 🌍 CORS CONFIG (VERY IMPORTANT)
+    // 🌍 CORS CONFIG — Fixed for Netlify + Render
     // ===============================
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // 🔥 MUST MATCH YOUR EXACT NETLIFY URL
-        config.setAllowedOrigins(List.of(
-            "https://hanuman-sangam-ui.netlify.app", // ✅ YOUR REAL FRONTEND
-            "http://localhost:3000",
-            "http://localhost:5500",
-            "http://127.0.0.1:5500"
+        // ✅ ALL allowed frontend origins
+        config.setAllowedOrigins(Arrays.asList(
+            "https://hanuman-sangam-ui.netlify.app",  // 🔥 Production Netlify
+            "http://localhost:3000",                   // React dev server
+            "http://localhost:5500",                   // Live Server (VSCode)
+            "http://127.0.0.1:5500",                  // Live Server alternate
+            "http://localhost:8080",                   // Other local ports
+            "http://127.0.0.1:3000"
         ));
 
-        config.setAllowedMethods(List.of(
-            "GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"
+        // ✅ All HTTP methods including OPTIONS (preflight)
+        config.setAllowedMethods(Arrays.asList(
+            "GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"
         ));
 
-        config.setAllowedHeaders(List.of(
+        // ✅ All common headers
+        config.setAllowedHeaders(Arrays.asList(
             "Authorization",
             "Content-Type",
             "Accept",
             "Origin",
-            "X-Requested-With"
+            "X-Requested-With",
+            "Access-Control-Request-Method",
+            "Access-Control-Request-Headers"
         ));
 
-        config.setExposedHeaders(List.of(
-            "Authorization"
+        // ✅ Expose Authorization header to frontend JS
+        config.setExposedHeaders(Arrays.asList(
+            "Authorization",
+            "Access-Control-Allow-Origin",
+            "Access-Control-Allow-Credentials"
         ));
 
+        // ✅ Allow cookies / Authorization header
         config.setAllowCredentials(true);
 
+        // ✅ Cache preflight for 1 hour (reduces OPTIONS requests)
         config.setMaxAge(3600L);
 
-        UrlBasedCorsConfigurationSource source =
-                new UrlBasedCorsConfigurationSource();
-
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
 
         return source;

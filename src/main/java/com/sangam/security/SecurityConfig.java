@@ -15,7 +15,6 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import java.util.Arrays;
 import java.util.List;
 
 @Configuration
@@ -28,6 +27,9 @@ public class SecurityConfig {
         this.jwtAuthFilter = jwtAuthFilter;
     }
 
+    // ===============================
+    // 🔐 SECURITY FILTER
+    // ===============================
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
@@ -36,57 +38,68 @@ public class SecurityConfig {
             .httpBasic(basic -> basic.disable())
             .formLogin(form -> form.disable())
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .authorizeHttpRequests(auth -> auth
-                // ── Public: no token needed ──────────────────────────────────
-                .requestMatchers("/api/auth/**").permitAll()
 
-                // ── Public read-only: stats + announcements shown on home page
+            .authorizeHttpRequests(auth -> auth
+
+                // ✅ PUBLIC APIs
+                .requestMatchers("/api/auth/**").permitAll()
                 .requestMatchers("/api/admin/stats").permitAll()
                 .requestMatchers("/api/admin/announcements").permitAll()
 
-                // ── Admin only ───────────────────────────────────────────────
+                // 🔒 ADMIN
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
 
-                // ── Member: own endpoints (profile, payments, members list) ──
+                // 🔒 MEMBER
                 .requestMatchers("/api/member/**").hasRole("MEMBER")
 
-                // ── Static files (HTML/CSS/JS) served by Spring Boot ─────────
+                // 🌐 STATIC (if needed)
                 .requestMatchers("/", "/*.html", "/css/**", "/js/**").permitAll()
 
                 .anyRequest().authenticated()
             )
+
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
 
+    // ===============================
+    // 🔑 PASSWORD ENCODER
+    // ===============================
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
     }
 
+    // ===============================
+    // 🔐 AUTH MANAGER
+    // ===============================
     @Bean
     public AuthenticationManager authenticationManager(
             AuthenticationConfiguration config) throws Exception {
         return config.getAuthenticationManager();
     }
 
+    // ===============================
+    // 🌍 CORS CONFIG (VERY IMPORTANT)
+    // ===============================
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        config.setAllowedOrigins(Arrays.asList(
-            "https://hanuman-sangam.netlify.app",   // ✅ your Netlify frontend
-            "http://localhost:3000",                 // ✅ local dev (React)
-            "http://localhost:5500",                 // ✅ local dev (Live Server / plain HTML)
-            "http://127.0.0.1:5500"                  // ✅ local dev (VS Code Live Server)
+        // 🔥 MUST MATCH YOUR EXACT NETLIFY URL
+        config.setAllowedOrigins(List.of(
+            "https://hanuman-sangam-ui.netlify.app", // ✅ YOUR REAL FRONTEND
+            "http://localhost:3000",
+            "http://localhost:5500",
+            "http://127.0.0.1:5500"
         ));
 
-        config.setAllowedMethods(Arrays.asList(
+        config.setAllowedMethods(List.of(
             "GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"
         ));
 
-        config.setAllowedHeaders(Arrays.asList(
+        config.setAllowedHeaders(List.of(
             "Authorization",
             "Content-Type",
             "Accept",
@@ -95,14 +108,18 @@ public class SecurityConfig {
         ));
 
         config.setExposedHeaders(List.of(
-            "Authorization"   // ✅ allows frontend to read JWT from response header if needed
+            "Authorization"
         ));
 
         config.setAllowCredentials(true);
-        config.setMaxAge(3600L); // ✅ cache preflight for 1 hour
 
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        config.setMaxAge(3600L);
+
+        UrlBasedCorsConfigurationSource source =
+                new UrlBasedCorsConfigurationSource();
+
         source.registerCorsConfiguration("/**", config);
+
         return source;
     }
 }

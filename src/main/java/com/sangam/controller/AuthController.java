@@ -19,7 +19,7 @@ import java.util.Map;
 // explicitly. Add your production domain here when deploying.
 @CrossOrigin(
     origins = {
-        "https://your-site-name.netlify.app",   // ✅ ADD THIS
+        "https://hanuman-sangam-ui.netlify.app",   // ✅ ADD THIS
         "http://localhost:8081",
         "http://localhost:8080",
         "http://127.0.0.1:8081",

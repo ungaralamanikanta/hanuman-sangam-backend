@@ -6,8 +6,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
 @EnableScheduling  // ← Add this
-public class HanumanSangamApplication {
+public class HanumanSangamBackendApplication {
     public static void main(String[] args) {
-        SpringApplication.run(HanumanSangamApplication.class, args);
+        SpringApplication.run(HanumanSangamBackendApplication.class, args);
     }
 }

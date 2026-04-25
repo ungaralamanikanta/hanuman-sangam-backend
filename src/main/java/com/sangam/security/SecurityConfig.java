@@ -16,7 +16,6 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import java.util.Arrays;
-import java.util.List;
 
 @Configuration
 @EnableWebSecurity
@@ -86,7 +85,7 @@ public class SecurityConfig {
     }
 
     // ===============================
-    // 🌍 CORS CONFIG — Fixed for Netlify + Render
+    // 🌍 CORS CONFIG
     // ===============================
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
@@ -94,7 +93,8 @@ public class SecurityConfig {
 
         // ✅ ALL allowed frontend origins
         config.setAllowedOrigins(Arrays.asList(
-            "https://hanuman-sangam-ui.netlify.app",  // 🔥 Production Netlify
+            "https://hanuman-sangam-ui.pages.dev",    // 🔥 Cloudflare Pages (PRIMARY)
+            "https://hanuman-sangam-ui.netlify.app",  // Netlify (keep as backup)
             "http://localhost:3000",                   // React dev server
             "http://localhost:5500",                   // Live Server (VSCode)
             "http://127.0.0.1:5500",                  // Live Server alternate
@@ -128,7 +128,7 @@ public class SecurityConfig {
         // ✅ Allow cookies / Authorization header
         config.setAllowCredentials(true);
 
-        // ✅ Cache preflight for 1 hour (reduces OPTIONS requests)
+        // ✅ Cache preflight for 1 hour
         config.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

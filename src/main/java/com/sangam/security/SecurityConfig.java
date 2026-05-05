@@ -27,9 +27,6 @@ public class SecurityConfig {
         this.jwtAuthFilter = jwtAuthFilter;
     }
 
-    // ===============================
-    // 🔐 SECURITY FILTER CHAIN
-    // ===============================
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
@@ -40,25 +37,13 @@ public class SecurityConfig {
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
             .authorizeHttpRequests(auth -> auth
-
-                // ✅ PUBLIC APIs — No token needed
                 .requestMatchers("/api/auth/**").permitAll()
                 .requestMatchers("/api/admin/stats").permitAll()
                 .requestMatchers("/api/admin/announcements").permitAll()
-
-                // ✅ OPTIONS preflight — MUST be permitted for CORS to work
                 .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
-
-                // 🔒 ADMIN only
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
-
-                // 🔒 MEMBER only
                 .requestMatchers("/api/member/**").hasRole("MEMBER")
-
-                // 🌐 STATIC FILES
                 .requestMatchers("/", "/*.html", "/css/**", "/js/**", "/images/**").permitAll()
-
-                // 🔒 Everything else requires authentication
                 .anyRequest().authenticated()
             )
 
@@ -67,47 +52,38 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // ===============================
-    // 🔑 PASSWORD ENCODER
-    // ===============================
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
     }
 
-    // ===============================
-    // 🔐 AUTH MANAGER
-    // ===============================
     @Bean
     public AuthenticationManager authenticationManager(
             AuthenticationConfiguration config) throws Exception {
         return config.getAuthenticationManager();
     }
 
-    // ===============================
-    // 🌍 CORS CONFIG
-    // ===============================
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // ✅ ALL allowed frontend origins
-        config.setAllowedOrigins(Arrays.asList(
-            "https://hanuman-sangam-ui.pages.dev",    // 🔥 Cloudflare Pages (PRIMARY)
-            "https://hanuman-sangam-ui.netlify.app",  // Netlify (keep as backup)
-            "http://localhost:3000",                   // React dev server
-            "http://localhost:5500",                   // Live Server (VSCode)
-            "http://127.0.0.1:5500",                  // Live Server alternate
-            "http://localhost:8080",                   // Other local ports
+        // ✅ FIX: Use setAllowedOriginPatterns instead of setAllowedOrigins
+        // This supports wildcards like *.pages.dev for all Cloudflare preview URLs
+        config.setAllowedOriginPatterns(Arrays.asList(
+            "https://*.hanuman-sangam-ui.pages.dev",  // ✅ ALL Cloudflare preview URLs (079d4c89.xxx, etc.)
+            "https://hanuman-sangam-ui.pages.dev",    // ✅ Main Cloudflare domain
+            "https://hanuman-sangam-ui.netlify.app",  // Netlify backup
+            "http://localhost:3000",
+            "http://localhost:5500",
+            "http://127.0.0.1:5500",
+            "http://localhost:8080",
             "http://127.0.0.1:3000"
         ));
 
-        // ✅ All HTTP methods including OPTIONS (preflight)
         config.setAllowedMethods(Arrays.asList(
             "GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"
         ));
 
-        // ✅ All common headers
         config.setAllowedHeaders(Arrays.asList(
             "Authorization",
             "Content-Type",
@@ -118,17 +94,13 @@ public class SecurityConfig {
             "Access-Control-Request-Headers"
         ));
 
-        // ✅ Expose Authorization header to frontend JS
         config.setExposedHeaders(Arrays.asList(
             "Authorization",
             "Access-Control-Allow-Origin",
             "Access-Control-Allow-Credentials"
         ));
 
-        // ✅ Allow cookies / Authorization header
         config.setAllowCredentials(true);
-
-        // ✅ Cache preflight for 1 hour
         config.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

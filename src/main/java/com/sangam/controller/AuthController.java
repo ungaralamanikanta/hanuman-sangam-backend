@@ -13,28 +13,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/auth")
-// BUG FIX: origins = "*" blocks requests that include Authorization headers
-// (browsers reject wildcard CORS with credentials). Since the frontend is
-// opened from file:// and also possibly http://localhost, we allow both
-// explicitly. Add your production domain here when deploying.
-@CrossOrigin(
-    origins = {
-        "https://hanuman-sangam-ui.netlify.app",   // ✅ ADD THIS
-        "http://localhost:8081",
-        "http://localhost:8080",
-        "http://127.0.0.1:8081",
-        "http://127.0.0.1:8080"
-    },
-    allowedHeaders = "*",
-    methods = {
-        RequestMethod.GET,
-        RequestMethod.POST,
-        RequestMethod.PUT,
-        RequestMethod.DELETE,
-        RequestMethod.OPTIONS
-    },
-    allowCredentials = "true"
-)
+// ── FIX (Bug 10): Removed @CrossOrigin — rely solely on SecurityConfig CORS ──
 public class AuthController {
 
     private final AuthService  authService;
@@ -49,8 +28,14 @@ public class AuthController {
     @PostMapping("/send-otp")
     public ResponseEntity<?> sendOtp(@RequestBody Map<String, String> body) {
         try {
+            // ── FIX (Bug 2): Validate email before passing to service ──
+            String email = body.get("email");
+            if (email == null || email.isBlank()) {
+                return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Email is required."));
+            }
             return ResponseEntity.ok(
-                Map.of("message", authService.sendOtp(body.get("email")))
+                Map.of("message", authService.sendOtp(email.trim().toLowerCase()))
             );
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
@@ -104,7 +89,6 @@ public class AuthController {
     }
 
     // ── Contact Form ──────────────────────────────────────────────
-    // Sends member message directly to admin email
     @PostMapping("/contact")
     public ResponseEntity<?> contactAdmin(@RequestBody Map<String, String> body) {
         try {

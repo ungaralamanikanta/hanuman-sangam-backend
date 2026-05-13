@@ -20,8 +20,8 @@ import java.util.Map;
  *   HTTPS calls on port 443 are never blocked, so this always works.
  *
  * Setup required in Brevo:
- *   1. Settings → Senders, domains & IPs → Add & verify hanumansangamu@gmail.com
- *   2. Settings → SMTP & API → API keys tab → Generate key → set as BREVO_API_KEY on Render
+ *   1. Settings → Senders, domains & IPs → Add & verify sender email
+ *   2. Settings → SMTP & API → API keys tab → Generate key → set as BREVO_API_KEY env var
  */
 @Service
 public class EmailService {
@@ -50,9 +50,6 @@ public class EmailService {
     // PRIVATE HELPERS
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Shared branded HTML wrapper applied to all emails.
-     */
     private String wrapInTemplate(String bodyContent) {
         return "<!DOCTYPE html><html lang='en'>" +
             "<head><meta charset='UTF-8'/>" +
@@ -68,7 +65,6 @@ public class EmailService {
             " style='max-width:600px;width:100%;border-radius:16px;" +
             " box-shadow:0 4px 24px rgba(0,0,0,0.09);overflow:hidden;'>" +
 
-            // ── HEADER
             "<tr><td style='background:linear-gradient(135deg,#bf360c,#e65c00,#f9a825);" +
             " padding:34px 40px;text-align:center;'>" +
             "<div style='font-size:50px;margin-bottom:10px;'>&#x1F64F;</div>" +
@@ -80,19 +76,16 @@ public class EmailService {
             " font-family:Arial,sans-serif;'>&#2404; Jay Shri Ram &#2404;</p>" +
             "</td></tr>" +
 
-            // ── BODY
             "<tr><td style='background:#ffffff;padding:38px 40px;'>" +
             bodyContent +
             "</td></tr>" +
 
-            // ── DIVIDER
             "<tr><td style='background:#fff8f0;padding:16px;text-align:center;" +
             " border-top:1px solid #f0e0cc;border-bottom:1px solid #f0e0cc;'>" +
             "<span style='color:#e65c00;font-size:18px;letter-spacing:8px;'>" +
             "~ ~ ~</span>" +
             "</td></tr>" +
 
-            // ── FOOTER
             "<tr><td style='background:#1a0a00;padding:26px 40px;text-align:center;'>" +
             "<p style='margin:0 0 5px;color:#f9a825;font-size:12px;font-weight:700;" +
             " letter-spacing:2px;font-family:Arial,sans-serif;'>HANUMAN SANGAM</p>" +
@@ -109,14 +102,6 @@ public class EmailService {
             "</body></html>";
     }
 
-    /**
-     * Core HTTP POST to Brevo REST API.
-     *
-     * @param to      recipient email
-     * @param name    recipient display name (nullable)
-     * @param subject email subject line
-     * @param html    HTML body (will be wrapped in template)
-     */
     private void send(String to, String name, String subject, String html) {
         try {
             Map<String, Object> payload = Map.of(
@@ -160,7 +145,6 @@ public class EmailService {
 
     public void sendOtp(String toEmail, String otp) {
         String html =
-            // Title
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
             " font-family:Georgia,serif;'>Email Verification</h2>" +
             "<p style='margin:0 0 26px;color:#bbb;font-size:11px;letter-spacing:1px;" +
@@ -168,7 +152,6 @@ public class EmailService {
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "One-Time Password for Hanuman Sangam Registration</p>" +
 
-            // Greeting
             "<p style='margin:0 0 14px;color:#333;font-size:15px;" +
             " line-height:1.8;'>Dear Member,</p>" +
             "<p style='margin:0 0 26px;color:#555;font-size:15px;" +
@@ -176,7 +159,6 @@ public class EmailService {
             "Thank you for joining <strong style='color:#e65c00;'>Hanuman Sangam</strong>! " +
             "Use the OTP below to verify your email and complete your registration.</p>" +
 
-            // OTP box
             "<div style='background:linear-gradient(135deg,#fff8f0,#fff3e0);" +
             " border:2px dashed #e65c00;border-radius:14px;" +
             " padding:30px 20px;text-align:center;margin:0 0 26px;'>" +
@@ -191,7 +173,6 @@ public class EmailService {
             "Valid for <strong>5 minutes</strong> only — do not share</p>" +
             "</div>" +
 
-            // Warning
             "<div style='background:#fff8e1;border-left:4px solid #f9a825;" +
             " border-radius:0 10px 10px 0;padding:14px 18px;margin:0 0 22px;'>" +
             "<p style='margin:0;color:#7a5c00;font-size:13px;" +
@@ -210,8 +191,10 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
+        // ── FIX (Bug 4): OTP removed from subject line — no longer visible in
+        // lock screens, notification banners, or email list previews ──
         send(toEmail, null,
-            "Your OTP: " + otp + " — Hanuman Sangam Verification", html);
+            "Hanuman Sangam — Email Verification Code", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -236,7 +219,6 @@ public class EmailService {
             "<strong style='color:#2e7d32;'>APPROVED</strong> by our admin. " +
             "You are now an official member of our sacred community!</p>" +
 
-            // Green success card
             "<div style='background:linear-gradient(135deg,#e8f5e9,#c8e6c9);" +
             " border:1px solid #a5d6a7;border-radius:14px;" +
             " padding:26px 20px;text-align:center;margin:0 0 26px;'>" +
@@ -247,7 +229,6 @@ public class EmailService {
             "Your account is now active and ready to use.</p>" +
             "</div>" +
 
-            // Next steps
             "<div style='background:#fafafa;border:1px solid #f0e0cc;" +
             " border-radius:12px;padding:22px;margin:0 0 22px;'>" +
             "<h4 style='margin:0 0 14px;color:#e65c00;font-size:11px;" +
@@ -292,7 +273,6 @@ public class EmailService {
             "request has <strong style='color:#c62828;'>not been approved</strong> " +
             "at this time.</p>" +
 
-            // Status card
             "<div style='background:#ffebee;border-left:5px solid #c62828;" +
             " border-radius:0 12px 12px 0;padding:20px;margin:0 0 26px;'>" +
             "<p style='margin:0 0 6px;color:#b71c1c;font-size:14px;" +
@@ -304,7 +284,6 @@ public class EmailService {
             "Please contact the admin for further clarification.</p>" +
             "</div>" +
 
-            // Contact box
             "<div style='background:#fafafa;border:1px solid #f0e0cc;" +
             " border-radius:12px;padding:20px;margin:0 0 22px;'>" +
             "<h4 style='margin:0 0 10px;color:#e65c00;font-size:11px;" +
@@ -381,7 +360,6 @@ public class EmailService {
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Received via Hanuman Sangam Member Portal</p>" +
 
-            // Member info
             "<div style='background:#fafafa;border:1px solid #f0e0cc;" +
             " border-radius:12px;padding:20px;margin:0 0 22px;'>" +
             "<h4 style='margin:0 0 14px;color:#e65c00;font-size:11px;" +
@@ -393,7 +371,6 @@ public class EmailService {
             infoRow("Phone", safePhone) +
             "</table></div>" +
 
-            // Message content
             "<div style='background:#fff8f0;border-left:5px solid #e65c00;" +
             " border-radius:0 12px 12px 0;padding:20px;margin:0 0 22px;'>" +
             "<h4 style='margin:0 0 12px;color:#e65c00;font-size:11px;" +
@@ -404,7 +381,6 @@ public class EmailService {
             " white-space:pre-line;'>" + message + "</p>" +
             "</div>" +
 
-            // Reply hint
             "<div style='background:#e8f5e9;border:1px solid #c8e6c9;" +
             " border-radius:10px;padding:14px 18px;'>" +
             "<p style='margin:0;color:#2e7d32;font-size:13px;" +
@@ -414,7 +390,6 @@ public class EmailService {
             safeEmail + "</a></p>" +
             "</div>";
 
-        // Build payload with replyTo manually since admin is the recipient
         try {
             Map<String, Object> payload = Map.of(
                 "sender",      Map.of("name", fromName, "email", fromEmail),
@@ -450,18 +425,12 @@ public class EmailService {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // TINY HTML BUILDER HELPERS  (avoid repetitive inline strings)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /** Builds a table row for the "What Can You Do Now?" list */
     private String row(String icon, String text) {
         return "<tr><td style='padding:7px 0;color:#444;font-size:14px;" +
                " font-family:Arial,sans-serif;line-height:1.6;'>" +
                icon + "&nbsp; " + text + "</td></tr>";
     }
 
-    /** Builds a two-column info row for member details */
     private String infoRow(String label, String value) {
         return "<tr>" +
                "<td style='color:#999;font-size:13px;font-family:Arial,sans-serif;" +
@@ -471,7 +440,6 @@ public class EmailService {
                "</tr>";
     }
 
-    /** Null-safe blank check */
     private boolean isBlank(String s) {
         return s == null || s.isBlank();
     }

@@ -73,11 +73,9 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- ── Mail (Brevo SMTP via JavaMailSender) ──────────────── -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-mail</artifactId>
-        </dependency>
+        <!-- ── NOTE: No spring-boot-starter-mail needed!         ── -->
+        <!-- ── EmailService uses Java 21 HttpClient + Brevo API  ── -->
+        <!-- ── over HTTPS (port 443) which Render never blocks.  ── -->
 
         <!-- ── Validation ───────────────────────────────────────── -->
         <dependency>

@@ -73,9 +73,12 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- ── NOTE: No spring-boot-starter-mail needed!         ── -->
-        <!-- ── EmailService uses Java 21 HttpClient + Brevo API  ── -->
-        <!-- ── over HTTPS (port 443) which Render never blocks.  ── -->
+        <!--
+            NO spring-boot-starter-mail here.
+            EmailService uses Java 21 built-in HttpClient to call
+            Brevo REST API over HTTPS (port 443).
+            Render never blocks port 443, so emails always work.
+        -->
 
         <!-- ── Validation ───────────────────────────────────────── -->
         <dependency>
@@ -90,7 +93,7 @@
             <optional>true</optional>
         </dependency>
 
-        <!-- ── DevTools (hot reload) ─────────────────────────────── -->
+        <!-- ── DevTools (hot reload in local dev only) ───────────── -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-devtools</artifactId>

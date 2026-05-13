@@ -7,12 +7,15 @@ import com.sangam.entity.OtpStore;
 import com.sangam.repository.MemberRepository;
 import com.sangam.repository.OtpStoreRepository;
 import com.sangam.security.JwtUtil;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
-import java.util.Random;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class AuthService {
@@ -23,9 +26,19 @@ public class AuthService {
     private final EmailService       emailService;
     private final JwtUtil            jwtUtil;
 
-    // Admin credentials — move to application.properties in production
-    private static final String ADMIN_PHONE    = "8985593816";
-    private static final String ADMIN_PASSWORD = "admin123";
+    // ── FIX (Bug 8): Admin credentials from environment/config, not hardcoded ──
+    @Value("${app.admin.phone}")
+    private String adminPhone;
+
+    @Value("${app.admin.password}")
+    private String adminPassword;
+
+    // ── FIX (Bug 7): Use SecureRandom instead of java.util.Random ──
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
+    // ── FIX (Bug 6): In-memory rate limiter for OTP requests ──
+    private final Map<String, LocalDateTime> otpCooldown = new ConcurrentHashMap<>();
+    private static final int OTP_COOLDOWN_SECONDS = 60;
 
     public AuthService(MemberRepository memberRepository,
                        OtpStoreRepository otpStoreRepository,
@@ -40,16 +53,34 @@ public class AuthService {
     }
 
     // ── STEP 1: Send OTP ──────────────────────────────────────────────────────
+    // FIX (Bug 1 & 3): Removed @Transactional so email failure does NOT
+    // roll back the OTP save. The OTP is persisted first, then email is sent.
+    // If email fails, OTP remains in DB and user can retry.
 
-    @Transactional
     public String sendOtp(String email) {
+        // ── FIX (Bug 2): Null/blank check (also done in controller, defense in depth) ──
+        if (email == null || email.isBlank()) {
+            throw new RuntimeException("Email is required.");
+        }
+        email = email.trim().toLowerCase();
+
         // Block already-registered emails
         if (memberRepository.existsByEmail(email)) {
             throw new RuntimeException("Email is already registered.");
         }
 
-        String otp = String.valueOf(100000 + new Random().nextInt(900000));
+        // ── FIX (Bug 6): Rate limit — 1 OTP per email per 60 seconds ──
+        LocalDateTime lastSent = otpCooldown.get(email);
+        if (lastSent != null && lastSent.plusSeconds(OTP_COOLDOWN_SECONDS).isAfter(LocalDateTime.now())) {
+            long waitSeconds = java.time.Duration.between(LocalDateTime.now(),
+                    lastSent.plusSeconds(OTP_COOLDOWN_SECONDS)).getSeconds();
+            throw new RuntimeException("Please wait " + waitSeconds + " seconds before requesting another OTP.");
+        }
 
+        // ── FIX (Bug 7): SecureRandom for cryptographic OTP generation ──
+        String otp = String.valueOf(100000 + SECURE_RANDOM.nextInt(900000));
+
+        // Save OTP to DB first (no @Transactional, so this commits immediately)
         OtpStore store = otpStoreRepository.findByEmail(email)
                 .orElse(new OtpStore());
         store.setEmail(email);
@@ -58,7 +89,19 @@ public class AuthService {
         store.setVerified(false);
         otpStoreRepository.save(store);
 
-        emailService.sendOtp(email, otp);
+        // ── FIX (Bug 1): Send email AFTER DB save, outside transaction ──
+        // If this fails, the OTP is still in DB — user can click "Resend OTP"
+        try {
+            emailService.sendOtp(email, otp);
+        } catch (Exception e) {
+            // OTP is saved but email failed — user should retry
+            throw new RuntimeException(
+                "OTP generated but email delivery failed. Please click 'Resend OTP'. Error: " + e.getMessage());
+        }
+
+        // Update cooldown tracker
+        otpCooldown.put(email, LocalDateTime.now());
+
         return "OTP sent to " + email;
     }
 
@@ -66,6 +109,14 @@ public class AuthService {
 
     @Transactional
     public String verifyOtp(String email, String otp) {
+        if (email == null || email.isBlank()) {
+            throw new RuntimeException("Email is required.");
+        }
+        if (otp == null || otp.isBlank()) {
+            throw new RuntimeException("OTP is required.");
+        }
+        email = email.trim().toLowerCase();
+
         OtpStore store = otpStoreRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("OTP not found. Please request a new one."));
 
@@ -85,35 +136,38 @@ public class AuthService {
 
     @Transactional
     public String register(RegisterRequest request) {
+        if (request.getEmail() == null || request.getEmail().isBlank()) {
+            throw new RuntimeException("Email is required.");
+        }
+        String email = request.getEmail().trim().toLowerCase();
+
         // Ensure OTP was verified
-        OtpStore store = otpStoreRepository.findByEmail(request.getEmail())
+        OtpStore store = otpStoreRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("Please verify your email with OTP first."));
 
         if (!store.isVerified()) {
             throw new RuntimeException("Email not verified. Please complete OTP verification first.");
         }
-        if (memberRepository.existsByEmail(request.getEmail())) {
+        if (memberRepository.existsByEmail(email)) {
             throw new RuntimeException("Email is already registered.");
         }
         if (memberRepository.existsByPhoneNumber(request.getPhoneNumber())) {
             throw new RuntimeException("Phone number is already registered.");
         }
 
-        // BUG FIX: This is the CORE fix for members not appearing in admin dashboard.
-        // Status must be explicitly set to PENDING before save so admin can see them.
         Member member = new Member();
         member.setName(request.getName());
-        member.setEmail(request.getEmail());
+        member.setEmail(email);
         member.setPhoneNumber(request.getPhoneNumber());
         member.setPassword(passwordEncoder.encode(request.getPassword()));
         member.setAddress(request.getAddress());
-        member.setStatus(Member.Status.PENDING);   // ← critical
+        member.setStatus(Member.Status.PENDING);
         member.setRole(Member.Role.MEMBER);
         member.setEmailVerified(true);
-        memberRepository.save(member);             // @PrePersist sets createdAt + registeredAt
+        memberRepository.save(member);
 
         // Clean up OTP record
-        otpStoreRepository.deleteByEmail(request.getEmail());
+        otpStoreRepository.deleteByEmail(email);
 
         return "Registration successful! Please wait for admin approval.";
     }
@@ -124,7 +178,6 @@ public class AuthService {
         Member member = memberRepository.findByPhoneNumber(phoneNumber)
                 .orElseThrow(() -> new RuntimeException("Invalid phone number or password."));
 
-        // ✅ Check status FIRST, before password
         if (member.getStatus() == Member.Status.PENDING) {
             throw new RuntimeException("Your account is pending admin approval.");
         }
@@ -143,7 +196,7 @@ public class AuthService {
     // ── Admin Login ──────────────────────────────────────────────────────────
 
     public LoginResponse adminLogin(String phoneNumber, String password) {
-        if (!ADMIN_PHONE.equals(phoneNumber) || !ADMIN_PASSWORD.equals(password)) {
+        if (!adminPhone.equals(phoneNumber) || !adminPassword.equals(password)) {
             throw new RuntimeException("Invalid admin credentials.");
         }
         String token = jwtUtil.generateToken(phoneNumber, "ADMIN");

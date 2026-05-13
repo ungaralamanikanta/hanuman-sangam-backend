@@ -18,12 +18,9 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/admin")
-@CrossOrigin(origins = "*")
+// ── FIX (Bug 10): Removed @CrossOrigin(origins="*") — rely solely on SecurityConfig CORS ──
 public class AdminController {
 
-    // BUG FIX: original controller injected MemberService for approve/reject.
-    // MemberService.approveMember() never set approvedAt and never sent email.
-    // All admin actions now go through AdminService which handles both correctly.
     private final AdminService          adminService;
     private final DashboardStatsService statsService;
 
@@ -45,7 +42,6 @@ public class AdminController {
         return adminService.getApprovedMembers();
     }
 
-    /** This is what the admin dashboard page calls to show the pending list */
     @GetMapping("/members/pending")
     public List<Member> getPendingMembers() {
         return adminService.getPendingMembers();

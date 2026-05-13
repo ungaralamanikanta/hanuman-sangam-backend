@@ -1,5 +1,7 @@
 package com.sangam.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
@@ -14,6 +16,12 @@ public class Payment {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // ── FIX (Bug 12): @JsonIgnore prevents LazyInitializationException ──
+    // Without this, Jackson tries to serialize the lazy-loaded Member proxy
+    // outside a Hibernate session, causing either:
+    //   - LazyInitializationException (no open session)
+    //   - Full member serialization including all nested data
+    @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "member_id", nullable = false)
     private Member member;
@@ -37,6 +45,18 @@ public class Payment {
     @PrePersist
     protected void onCreate() {
         if (this.paymentDate == null) this.paymentDate = LocalDateTime.now();
+    }
+
+    // ── FIX (Bug 12): Expose memberId and memberName in JSON without
+    // serializing the full Member object ──
+    @JsonProperty("memberId")
+    public Long getMemberId() {
+        return member != null ? member.getId() : null;
+    }
+
+    @JsonProperty("memberName")
+    public String getMemberName() {
+        return member != null ? member.getName() : null;
     }
 
     public Long getId()                             { return id; }

@@ -13,26 +13,7 @@ import java.util.*;
 
 @RestController
 @RequestMapping("/api/member")
-// FIX: origins="*" blocks requests with Authorization header in browsers.
-// Must list explicit origins including "null" for file:// pages.
-@CrossOrigin(
-    origins = {
-        "http://localhost:8081",
-        "http://localhost:8080",
-        "http://127.0.0.1:8081",
-        "http://127.0.0.1:8080",
-        "null"  // ← browsers send Origin: null for file:// opened pages
-    },
-    allowedHeaders = "*",
-    methods = {
-        RequestMethod.GET,
-        RequestMethod.POST,
-        RequestMethod.PUT,
-        RequestMethod.DELETE,
-        RequestMethod.OPTIONS
-    },
-    allowCredentials = "false"
-)
+// ── FIX (Bug 10): Removed @CrossOrigin — rely solely on SecurityConfig CORS ──
 public class MemberController {
 
     private final MemberService     memberService;
@@ -70,10 +51,6 @@ public class MemberController {
     }
 
     // ── All Approved Members ──────────────────────────────────────
-    // Returns a plain JSON array: [ {id, name, paid, pending, contact}, ... ]
-    // FIX (frontend): member-dashboard.js was reading data.members but this
-    // endpoint returns a plain array — fixed in member-dashboard.js to use
-    // Array.isArray(data) ? data : [] instead of data.members
     @GetMapping("/members")
     public ResponseEntity<?> getAllApprovedMembers() {
         try {

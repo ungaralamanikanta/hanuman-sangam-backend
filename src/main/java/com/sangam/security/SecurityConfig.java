@@ -63,21 +63,25 @@ public class SecurityConfig {
         return config.getAuthenticationManager();
     }
 
+    // ── FIX (Bug 10): This is now the SINGLE source of truth for CORS ──
+    // All @CrossOrigin annotations removed from controllers.
+    // Add your production domain here when deploying.
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // ✅ FIX: Use setAllowedOriginPatterns instead of setAllowedOrigins
-        // This supports wildcards like *.pages.dev for all Cloudflare preview URLs
         config.setAllowedOriginPatterns(Arrays.asList(
-            "https://*.hanuman-sangam-ui.pages.dev",  // ✅ ALL Cloudflare preview URLs (079d4c89.xxx, etc.)
-            "https://hanuman-sangam-ui.pages.dev",    // ✅ Main Cloudflare domain
-            "https://hanuman-sangam-ui.netlify.app",  // Netlify backup
+            "https://*.hanuman-sangam-ui.pages.dev",
+            "https://hanuman-sangam-ui.pages.dev",
+            "https://hanuman-sangam-ui.netlify.app",
             "http://localhost:3000",
             "http://localhost:5500",
             "http://127.0.0.1:5500",
             "http://localhost:8080",
-            "http://127.0.0.1:3000"
+            "http://localhost:8081",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8081"
         ));
 
         config.setAllowedMethods(Arrays.asList(

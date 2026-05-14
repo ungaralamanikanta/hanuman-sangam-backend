@@ -1,14 +1,36 @@
 package com.sangam.service;
 
-import jakarta.mail.*;
-import jakarta.mail.internet.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.util.Properties;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 
+/**
+ * EmailService — sends transactional emails via Resend REST API (HTTPS/443).
+ *
+ * Why Resend?
+ *   - Free forever: 3,000 emails/month, 100/day
+ *   - REST API over port 443 — Render never blocks this
+ *   - No account review, works immediately after signup
+ *   - Simple single API key auth
+ *
+ * Resend API docs: https://resend.com/docs/api-reference/emails/send-email
+ */
 @Service
 public class EmailService {
+
+    @Value("${resend.api.key}")
+    private String apiKey;
+
+    @Value("${app.admin.email}")
+    private String adminEmail;
 
     @Value("${app.mail.from}")
     private String fromEmail;
@@ -16,82 +38,17 @@ public class EmailService {
     @Value("${app.mail.from-name}")
     private String fromName;
 
-    @Value("${app.mail.password}")
-    private String appPassword;
+    private static final String RESEND_SEND_URL = "https://api.resend.com/emails";
 
-    @Value("${app.admin.email}")
-    private String adminEmail;
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // CORE SMTP SESSION — port 465 SSL (works on Render)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private Session buildSession() {
-        Properties props = new Properties();
-        props.put("mail.smtp.auth",            "true");
-        props.put("mail.smtp.ssl.enable",      "true");   // SSL on port 465
-        props.put("mail.smtp.host",            "smtp.gmail.com");
-        props.put("mail.smtp.port",            "465");     // 465 instead of 587
-        props.put("mail.smtp.ssl.trust",       "smtp.gmail.com");
-        props.put("mail.smtp.connectiontimeout", "10000");
-        props.put("mail.smtp.timeout",           "15000");
-        props.put("mail.smtp.writetimeout",      "15000");
-
-        return Session.getInstance(props, new Authenticator() {
-            @Override
-            protected PasswordAuthentication getPasswordAuthentication() {
-                return new PasswordAuthentication(fromEmail, appPassword);
-            }
-        });
-    }
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     // ─────────────────────────────────────────────────────────────────────────
     // PRIVATE HELPERS
     // ─────────────────────────────────────────────────────────────────────────
-
-    private void send(String to, String toName, String subject, String html) {
-        try {
-            Session session = buildSession();
-            MimeMessage message = new MimeMessage(session);
-            message.setFrom(new InternetAddress(fromEmail, fromName, "UTF-8"));
-            message.setRecipient(Message.RecipientType.TO,
-                new InternetAddress(to, toName != null ? toName : to, "UTF-8"));
-            message.setSubject(subject, "UTF-8");
-
-            MimeBodyPart htmlPart = new MimeBodyPart();
-            htmlPart.setContent(wrapInTemplate(html), "text/html; charset=UTF-8");
-            Multipart multipart = new MimeMultipart("alternative");
-            multipart.addBodyPart(htmlPart);
-            message.setContent(multipart);
-
-            Transport.send(message);
-        } catch (Exception e) {
-            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
-        }
-    }
-
-    private void sendWithReplyTo(String to, String toName,
-                                  String replyTo, String subject, String html) {
-        try {
-            Session session = buildSession();
-            MimeMessage message = new MimeMessage(session);
-            message.setFrom(new InternetAddress(fromEmail, fromName, "UTF-8"));
-            message.setRecipient(Message.RecipientType.TO,
-                new InternetAddress(to, toName != null ? toName : to, "UTF-8"));
-            message.setReplyTo(new Address[]{new InternetAddress(replyTo)});
-            message.setSubject(subject, "UTF-8");
-
-            MimeBodyPart htmlPart = new MimeBodyPart();
-            htmlPart.setContent(wrapInTemplate(html), "text/html; charset=UTF-8");
-            Multipart multipart = new MimeMultipart("alternative");
-            multipart.addBodyPart(htmlPart);
-            message.setContent(multipart);
-
-            Transport.send(message);
-        } catch (Exception e) {
-            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
-        }
-    }
 
     private String wrapInTemplate(String bodyContent) {
         return "<!DOCTYPE html><html lang='en'>" +
@@ -137,6 +94,83 @@ public class EmailService {
 
             "</table></td></tr></table>" +
             "</body></html>";
+    }
+
+    /**
+     * Core send using Resend API.
+     * Resend payload format:
+     *   { "from": "Name <email>", "to": ["email"], "subject": "...", "html": "..." }
+     * Auth: Bearer token in Authorization header
+     */
+    private void send(String to, String subject, String html) {
+        try {
+            Map<String, Object> payload = Map.of(
+                "from",    fromName + " <" + fromEmail + ">",
+                "to",      List.of(to),
+                "subject", subject,
+                "html",    wrapInTemplate(html)
+            );
+
+            String json = objectMapper.writeValueAsString(payload);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(RESEND_SEND_URL))
+                .timeout(Duration.ofSeconds(15))
+                .header("Accept",        "application/json")
+                .header("Content-Type",  "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .build();
+
+            HttpResponse<String> response =
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new RuntimeException(
+                    "Resend API error " + response.statusCode() + ": " + response.body());
+            }
+
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
+        }
+    }
+
+    private void sendWithReplyTo(String to, String replyTo, String subject, String html) {
+        try {
+            Map<String, Object> payload = Map.of(
+                "from",     fromName + " <" + fromEmail + ">",
+                "to",       List.of(to),
+                "reply_to", replyTo,
+                "subject",  subject,
+                "html",     wrapInTemplate(html)
+            );
+
+            String json = objectMapper.writeValueAsString(payload);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(RESEND_SEND_URL))
+                .timeout(Duration.ofSeconds(15))
+                .header("Accept",        "application/json")
+                .header("Content-Type",  "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .build();
+
+            HttpResponse<String> response =
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new RuntimeException(
+                    "Resend API error " + response.statusCode() + ": " + response.body());
+            }
+
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -189,7 +223,7 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, null, "Hanuman Sangam — Email Verification Code", html);
+        send(toEmail, "Hanuman Sangam — Email Verification Code", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -240,7 +274,7 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName, "Membership Approved — Welcome to Hanuman Sangam!", html);
+        send(toEmail, "Membership Approved — Welcome to Hanuman Sangam!", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -296,7 +330,7 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName, "Membership Status Update — Hanuman Sangam", html);
+        send(toEmail, "Membership Status Update — Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -328,7 +362,7 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName, title + " — Hanuman Sangam", html);
+        send(toEmail, title + " — Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -378,7 +412,7 @@ public class EmailService {
             safeEmail + "</a></p>" +
             "</div>";
 
-        sendWithReplyTo(adminEmail, "Admin", replyTo,
+        sendWithReplyTo(adminEmail, replyTo,
             "Contact from " + memberName + " — Hanuman Sangam", html);
     }
 

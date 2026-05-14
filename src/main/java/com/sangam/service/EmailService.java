@@ -1,6 +1,8 @@
 package com.sangam.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -14,10 +16,23 @@ import java.util.Map;
 
 /**
  * EmailService — sends transactional emails via Brevo REST API (HTTPS/443).
- * Render never blocks port 443. Free 300 emails/day forever.
+ *
+ * Why Brevo REST API?
+ *   - Render.com blocks all SMTP ports (25, 465, 587)
+ *   - HTTPS port 443 is never blocked
+ *   - Free 300 emails/day forever
+ *   - No domain required
+ *
+ * Improvements:
+ *   - Retry logic (3 attempts) for transient failures
+ *   - Proper logging for debugging
+ *   - Null safety on all inputs
+ *   - Timeout tuning for Render's cold starts
  */
 @Service
 public class EmailService {
+
+    private static final Logger log = LoggerFactory.getLogger(EmailService.class);
 
     @Value("${brevo.api.key}")
     private String apiKey;
@@ -32,15 +47,103 @@ public class EmailService {
     private String fromName;
 
     private static final String BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email";
+    private static final int    MAX_RETRIES    = 3;
+    private static final long   RETRY_DELAY_MS = 1000;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
+            .connectTimeout(Duration.ofSeconds(15))
             .build();
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // ─────────────────────────────────────────────────────────────────────────
-    // PRIVATE HELPERS
+    // CORE SEND WITH RETRY
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void send(String to, String name, String subject, String html) {
+        send(to, name, subject, html, null);
+    }
+
+    private void send(String to, String name, String subject, String html, String replyTo) {
+        if (isBlank(to)) {
+            throw new RuntimeException("Recipient email is required.");
+        }
+
+        Exception lastException = null;
+
+        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                Map<String, Object> payload;
+
+                if (replyTo != null) {
+                    payload = Map.of(
+                        "sender",      Map.of("name", fromName, "email", fromEmail),
+                        "to",          List.of(Map.of("email", to, "name", name != null ? name : to)),
+                        "replyTo",     Map.of("email", replyTo),
+                        "subject",     subject,
+                        "htmlContent", wrapInTemplate(html)
+                    );
+                } else {
+                    payload = Map.of(
+                        "sender",      Map.of("name", fromName, "email", fromEmail),
+                        "to",          List.of(Map.of("email", to, "name", name != null ? name : to)),
+                        "subject",     subject,
+                        "htmlContent", wrapInTemplate(html)
+                    );
+                }
+
+                String json = objectMapper.writeValueAsString(payload);
+
+                HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(BREVO_SEND_URL))
+                    .timeout(Duration.ofSeconds(20))
+                    .header("Accept",       "application/json")
+                    .header("Content-Type", "application/json")
+                    .header("api-key",      apiKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(json))
+                    .build();
+
+                HttpResponse<String> response =
+                    httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+                if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                    log.info("Email sent successfully to {} (attempt {})", to, attempt);
+                    return;
+                }
+
+                String error = "Brevo API error " + response.statusCode() + ": " + response.body();
+                log.warn("Email attempt {}/{} failed: {}", attempt, MAX_RETRIES, error);
+
+                // 401/403 = auth error, no point retrying
+                if (response.statusCode() == 401 || response.statusCode() == 403) {
+                    throw new RuntimeException(error);
+                }
+
+                lastException = new RuntimeException(error);
+
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                log.warn("Email attempt {}/{} exception: {}", attempt, MAX_RETRIES, e.getMessage());
+                lastException = e;
+            }
+
+            // Wait before retrying
+            if (attempt < MAX_RETRIES) {
+                try {
+                    Thread.sleep(RETRY_DELAY_MS * attempt);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+
+        throw new RuntimeException("Email send failed after " + MAX_RETRIES +
+            " attempts: " + (lastException != null ? lastException.getMessage() : "unknown error"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HTML TEMPLATE
     // ─────────────────────────────────────────────────────────────────────────
 
     private String wrapInTemplate(String bodyContent) {
@@ -89,48 +192,12 @@ public class EmailService {
             "</body></html>";
     }
 
-    private void send(String to, String name, String subject, String html) {
-        try {
-            Map<String, Object> payload = Map.of(
-                "sender",      Map.of("name", fromName, "email", fromEmail),
-                "to",          List.of(Map.of(
-                                   "email", to,
-                                   "name",  name != null ? name : to)),
-                "subject",     subject,
-                "htmlContent", wrapInTemplate(html)
-            );
-
-            String json = objectMapper.writeValueAsString(payload);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(BREVO_SEND_URL))
-                .timeout(Duration.ofSeconds(15))
-                .header("Accept",       "application/json")
-                .header("Content-Type", "application/json")
-                .header("api-key",      apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(json))
-                .build();
-
-            HttpResponse<String> response =
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new RuntimeException(
-                    "Brevo API error " + response.statusCode() + ": " + response.body());
-            }
-
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
-        }
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
     // 1. OTP VERIFICATION
     // ─────────────────────────────────────────────────────────────────────────
 
     public void sendOtp(String toEmail, String otp) {
+        log.info("Sending OTP to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
             " font-family:Georgia,serif;'>Email Verification</h2>" +
@@ -184,6 +251,7 @@ public class EmailService {
     // ─────────────────────────────────────────────────────────────────────────
 
     public void sendApprovalNotification(String toEmail, String memberName) {
+        log.info("Sending approval notification to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#2e7d32;font-size:21px;" +
             " font-family:Georgia,serif;'>Membership Approved! &#x2705;</h2>" +
@@ -235,6 +303,7 @@ public class EmailService {
     // ─────────────────────────────────────────────────────────────────────────
 
     public void sendRejectionNotification(String toEmail, String memberName) {
+        log.info("Sending rejection notification to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#c62828;font-size:21px;" +
             " font-family:Georgia,serif;'>Membership Status Update</h2>" +
@@ -292,6 +361,7 @@ public class EmailService {
 
     public void sendAnnouncementEmail(String toEmail, String memberName,
                                       String title, String announcementBody) {
+        log.info("Sending announcement '{}' to {}", title, toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
             " font-family:Georgia,serif;'>&#x1F4E2; " + title + "</h2>" +
@@ -324,6 +394,7 @@ public class EmailService {
 
     public void sendContactMessageToAdmin(String memberName, String memberEmail,
                                           String memberPhone, String message) {
+        log.info("Sending contact message from {} to admin", memberName);
         String safeEmail = isBlank(memberEmail) ? "Not provided" : memberEmail;
         String safePhone = isBlank(memberPhone) ? "Not provided" : memberPhone;
         String replyTo   = isBlank(memberEmail) ? adminEmail : memberEmail;
@@ -365,40 +436,12 @@ public class EmailService {
             safeEmail + "</a></p>" +
             "</div>";
 
-        try {
-            Map<String, Object> payload = Map.of(
-                "sender",      Map.of("name", fromName, "email", fromEmail),
-                "to",          List.of(Map.of("email", adminEmail, "name", "Admin")),
-                "replyTo",     Map.of("email", replyTo),
-                "subject",     "Contact from " + memberName + " — Hanuman Sangam",
-                "htmlContent", wrapInTemplate(html)
-            );
-
-            String json = objectMapper.writeValueAsString(payload);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(BREVO_SEND_URL))
-                .timeout(Duration.ofSeconds(15))
-                .header("Accept",       "application/json")
-                .header("Content-Type", "application/json")
-                .header("api-key",      apiKey)
-                .POST(HttpRequest.BodyPublishers.ofString(json))
-                .build();
-
-            HttpResponse<String> response =
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new RuntimeException(
-                    "Brevo API error " + response.statusCode() + ": " + response.body());
-            }
-
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to send contact email: " + e.getMessage(), e);
-        }
+        send(adminEmail, "Admin", "Contact from " + memberName + " — Hanuman Sangam", html, replyTo);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
 
     private String row(String icon, String text) {
         return "<tr><td style='padding:7px 0;color:#444;font-size:14px;" +

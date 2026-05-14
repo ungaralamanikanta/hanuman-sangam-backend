@@ -73,12 +73,11 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!--
-            NO spring-boot-starter-mail here.
-            EmailService uses Java 21 built-in HttpClient to call
-            Brevo REST API over HTTPS (port 443).
-            Render never blocks port 443, so emails always work.
-        -->
+        <!-- ── JavaMail (Gmail SMTP) ─────────────────────────────── -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
 
         <!-- ── Validation ───────────────────────────────────────── -->
         <dependency>

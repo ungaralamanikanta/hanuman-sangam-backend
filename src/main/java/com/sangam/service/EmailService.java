@@ -9,25 +9,28 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
 /**
- * EmailService — sends transactional emails via Brevo REST API (HTTPS/443).
+ * EmailService — sends transactional emails via Mailjet REST API (HTTPS/443).
  *
  * Why not SMTP?
  *   Render.com blocks all outbound SMTP (ports 465 & 587).
  *   HTTPS calls on port 443 are never blocked, so this always works.
  *
- * Setup required in Brevo:
- *   1. Settings → Senders, domains & IPs → Add & verify sender email
- *   2. Settings → SMTP & API → API keys tab → Generate key → set as BREVO_API_KEY env var
+ * Mailjet uses Basic Auth: Base64(apiKey:secretKey)
+ * API endpoint: https://api.mailjet.com/v3.1/send
  */
 @Service
 public class EmailService {
 
-    @Value("${brevo.api.key}")
+    @Value("${mailjet.api.key}")
     private String apiKey;
+
+    @Value("${mailjet.secret.key}")
+    private String secretKey;
 
     @Value("${app.admin.email}")
     private String adminEmail;
@@ -38,7 +41,7 @@ public class EmailService {
     @Value("${app.mail.from-name}")
     private String fromName;
 
-    private static final String BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email";
+    private static final String MAILJET_SEND_URL = "https://api.mailjet.com/v3.1/send";
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -49,6 +52,12 @@ public class EmailService {
     // ─────────────────────────────────────────────────────────────────────────
     // PRIVATE HELPERS
     // ─────────────────────────────────────────────────────────────────────────
+
+    /** Builds Basic Auth header: Base64(apiKey:secretKey) */
+    private String basicAuth() {
+        String credentials = apiKey + ":" + secretKey;
+        return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes());
+    }
 
     private String wrapInTemplate(String bodyContent) {
         return "<!DOCTYPE html><html lang='en'>" +
@@ -102,25 +111,35 @@ public class EmailService {
             "</body></html>";
     }
 
+    /**
+     * Core send using Mailjet v3.1 API.
+     * Key differences from Brevo:
+     *   - Uses "Messages" array wrapper
+     *   - "From" instead of "sender"
+     *   - "To" uses "Email"/"Name" (capital E/N)
+     *   - "HTMLPart" instead of "htmlContent"
+     *   - Auth is Basic (apiKey:secretKey), not single api-key header
+     */
     private void send(String to, String name, String subject, String html) {
         try {
-            Map<String, Object> payload = Map.of(
-                "sender",      Map.of("name", fromName, "email", fromEmail),
-                "to",          List.of(Map.of(
-                                   "email", to,
-                                   "name",  name != null ? name : to)),
-                "subject",     subject,
-                "htmlContent", wrapInTemplate(html)
+            Map<String, Object> message = Map.of(
+                "From",     Map.of("Email", fromEmail, "Name", fromName),
+                "To",       List.of(Map.of(
+                                "Email", to,
+                                "Name",  name != null ? name : to)),
+                "Subject",  subject,
+                "HTMLPart", wrapInTemplate(html)
             );
 
+            Map<String, Object> payload = Map.of("Messages", List.of(message));
             String json = objectMapper.writeValueAsString(payload);
 
             HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(BREVO_SEND_URL))
+                .uri(URI.create(MAILJET_SEND_URL))
                 .timeout(Duration.ofSeconds(15))
-                .header("Accept",       "application/json")
-                .header("Content-Type", "application/json")
-                .header("api-key",      apiKey)
+                .header("Accept",        "application/json")
+                .header("Content-Type",  "application/json")
+                .header("Authorization", basicAuth())
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build();
 
@@ -129,7 +148,7 @@ public class EmailService {
 
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw new RuntimeException(
-                    "Brevo API error " + response.statusCode() + ": " + response.body());
+                    "Mailjet API error " + response.statusCode() + ": " + response.body());
             }
 
         } catch (RuntimeException e) {
@@ -191,10 +210,7 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        // ── FIX (Bug 4): OTP removed from subject line — no longer visible in
-        // lock screens, notification banners, or email list previews ──
-        send(toEmail, null,
-            "Hanuman Sangam — Email Verification Code", html);
+        send(toEmail, null, "Hanuman Sangam — Email Verification Code", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -246,8 +262,7 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName,
-            "Membership Approved — Welcome to Hanuman Sangam!", html);
+        send(toEmail, memberName, "Membership Approved — Welcome to Hanuman Sangam!", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -305,8 +320,7 @@ public class EmailService {
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName,
-            "Membership Status Update — Hanuman Sangam", html);
+        send(toEmail, memberName, "Membership Status Update — Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -350,7 +364,7 @@ public class EmailService {
                                           String memberPhone, String message) {
         String safeEmail = isBlank(memberEmail) ? "Not provided" : memberEmail;
         String safePhone = isBlank(memberPhone) ? "Not provided" : memberPhone;
-        String replyTo   = isBlank(memberEmail) ? adminEmail  : memberEmail;
+        String replyTo   = isBlank(memberEmail) ? adminEmail : memberEmail;
 
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
@@ -391,22 +405,23 @@ public class EmailService {
             "</div>";
 
         try {
-            Map<String, Object> payload = Map.of(
-                "sender",      Map.of("name", fromName, "email", fromEmail),
-                "to",          List.of(Map.of("email", adminEmail, "name", "Admin")),
-                "replyTo",     Map.of("email", replyTo),
-                "subject",     "Contact from " + memberName + " — Hanuman Sangam",
-                "htmlContent", wrapInTemplate(html)
+            Map<String, Object> msg = Map.of(
+                "From",     Map.of("Email", fromEmail, "Name", fromName),
+                "To",       List.of(Map.of("Email", adminEmail, "Name", "Admin")),
+                "ReplyTo",  Map.of("Email", replyTo),
+                "Subject",  "Contact from " + memberName + " — Hanuman Sangam",
+                "HTMLPart", wrapInTemplate(html)
             );
 
+            Map<String, Object> payload = Map.of("Messages", List.of(msg));
             String json = objectMapper.writeValueAsString(payload);
 
             HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(BREVO_SEND_URL))
+                .uri(URI.create(MAILJET_SEND_URL))
                 .timeout(Duration.ofSeconds(15))
-                .header("Accept",       "application/json")
-                .header("Content-Type", "application/json")
-                .header("api-key",      apiKey)
+                .header("Accept",        "application/json")
+                .header("Content-Type",  "application/json")
+                .header("Authorization", basicAuth())
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build();
 
@@ -415,7 +430,7 @@ public class EmailService {
 
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw new RuntimeException(
-                    "Brevo API error " + response.statusCode() + ": " + response.body());
+                    "Mailjet API error " + response.statusCode() + ": " + response.body());
             }
 
         } catch (RuntimeException e) {

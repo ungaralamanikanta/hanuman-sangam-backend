@@ -7,20 +7,6 @@ import org.springframework.stereotype.Service;
 
 import java.util.Properties;
 
-/**
- * EmailService — sends transactional emails via Gmail SMTP + App Password.
- *
- * Why Gmail SMTP instead of Brevo/Mailjet?
- *   - No third-party dependency, no API keys to rotate, never blocked
- *   - Uses port 587 (STARTTLS) which Render allows
- *   - Gmail App Password = permanent, never expires unless you revoke it
- *   - Free forever, no daily/monthly limits for normal usage
- *
- * One-time setup:
- *   1. Google Account → Security → 2-Step Verification → ON
- *   2. Search "App passwords" → Generate → copy 16-char password
- *   3. Set GMAIL_APP_PASSWORD env var on Render
- */
 @Service
 public class EmailService {
 
@@ -37,16 +23,16 @@ public class EmailService {
     private String adminEmail;
 
     // ─────────────────────────────────────────────────────────────────────────
-    // CORE SMTP SESSION — reused for every send
+    // CORE SMTP SESSION — port 465 SSL (works on Render)
     // ─────────────────────────────────────────────────────────────────────────
 
     private Session buildSession() {
         Properties props = new Properties();
         props.put("mail.smtp.auth",            "true");
-        props.put("mail.smtp.starttls.enable", "true");
-        props.put("mail.smtp.starttls.required","true");
+        props.put("mail.smtp.ssl.enable",      "true");   // SSL on port 465
         props.put("mail.smtp.host",            "smtp.gmail.com");
-        props.put("mail.smtp.port",            "587");
+        props.put("mail.smtp.port",            "465");     // 465 instead of 587
+        props.put("mail.smtp.ssl.trust",       "smtp.gmail.com");
         props.put("mail.smtp.connectiontimeout", "10000");
         props.put("mail.smtp.timeout",           "15000");
         props.put("mail.smtp.writetimeout",      "15000");
@@ -67,7 +53,6 @@ public class EmailService {
         try {
             Session session = buildSession();
             MimeMessage message = new MimeMessage(session);
-
             message.setFrom(new InternetAddress(fromEmail, fromName, "UTF-8"));
             message.setRecipient(Message.RecipientType.TO,
                 new InternetAddress(to, toName != null ? toName : to, "UTF-8"));
@@ -75,13 +60,11 @@ public class EmailService {
 
             MimeBodyPart htmlPart = new MimeBodyPart();
             htmlPart.setContent(wrapInTemplate(html), "text/html; charset=UTF-8");
-
             Multipart multipart = new MimeMultipart("alternative");
             multipart.addBodyPart(htmlPart);
             message.setContent(multipart);
 
             Transport.send(message);
-
         } catch (Exception e) {
             throw new RuntimeException("Email send failed: " + e.getMessage(), e);
         }
@@ -92,7 +75,6 @@ public class EmailService {
         try {
             Session session = buildSession();
             MimeMessage message = new MimeMessage(session);
-
             message.setFrom(new InternetAddress(fromEmail, fromName, "UTF-8"));
             message.setRecipient(Message.RecipientType.TO,
                 new InternetAddress(to, toName != null ? toName : to, "UTF-8"));
@@ -101,13 +83,11 @@ public class EmailService {
 
             MimeBodyPart htmlPart = new MimeBodyPart();
             htmlPart.setContent(wrapInTemplate(html), "text/html; charset=UTF-8");
-
             Multipart multipart = new MimeMultipart("alternative");
             multipart.addBodyPart(htmlPart);
             message.setContent(multipart);
 
             Transport.send(message);
-
         } catch (Exception e) {
             throw new RuntimeException("Email send failed: " + e.getMessage(), e);
         }
@@ -118,8 +98,7 @@ public class EmailService {
             "<head><meta charset='UTF-8'/>" +
             "<meta name='viewport' content='width=device-width,initial-scale=1'/>" +
             "</head>" +
-            "<body style='margin:0;padding:0;background:#fdf6ee;" +
-            "font-family:Georgia,serif;'>" +
+            "<body style='margin:0;padding:0;background:#fdf6ee;font-family:Georgia,serif;'>" +
             "<table width='100%' cellpadding='0' cellspacing='0'" +
             " style='background:#fdf6ee;padding:36px 16px;'>" +
             "<tr><td align='center'>" +
@@ -188,8 +167,7 @@ public class EmailService {
             "<div style='font-size:44px;font-weight:700;color:#e65c00;" +
             " letter-spacing:14px;font-family:\"Courier New\",monospace;margin:6px 0;'>" +
             otp + "</div>" +
-            "<p style='margin:10px 0 0;color:#999;font-size:12px;" +
-            " font-family:Arial,sans-serif;'>" +
+            "<p style='margin:10px 0 0;color:#999;font-size:12px;font-family:Arial,sans-serif;'>" +
             "Valid for <strong>5 minutes</strong> only — do not share</p>" +
             "</div>" +
 

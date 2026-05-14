@@ -1,39 +1,28 @@
 package com.sangam.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.mail.*;
+import jakarta.mail.internet.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
-import java.util.Base64;
-import java.util.List;
-import java.util.Map;
+import java.util.Properties;
 
 /**
- * EmailService — sends transactional emails via Mailjet REST API (HTTPS/443).
+ * EmailService — sends transactional emails via Gmail SMTP + App Password.
  *
- * Why not SMTP?
- *   Render.com blocks all outbound SMTP (ports 465 & 587).
- *   HTTPS calls on port 443 are never blocked, so this always works.
+ * Why Gmail SMTP instead of Brevo/Mailjet?
+ *   - No third-party dependency, no API keys to rotate, never blocked
+ *   - Uses port 587 (STARTTLS) which Render allows
+ *   - Gmail App Password = permanent, never expires unless you revoke it
+ *   - Free forever, no daily/monthly limits for normal usage
  *
- * Mailjet uses Basic Auth: Base64(apiKey:secretKey)
- * API endpoint: https://api.mailjet.com/v3.1/send
+ * One-time setup:
+ *   1. Google Account → Security → 2-Step Verification → ON
+ *   2. Search "App passwords" → Generate → copy 16-char password
+ *   3. Set GMAIL_APP_PASSWORD env var on Render
  */
 @Service
 public class EmailService {
-
-    @Value("${mailjet.api.key}")
-    private String apiKey;
-
-    @Value("${mailjet.secret.key}")
-    private String secretKey;
-
-    @Value("${app.admin.email}")
-    private String adminEmail;
 
     @Value("${app.mail.from}")
     private String fromEmail;
@@ -41,22 +30,87 @@ public class EmailService {
     @Value("${app.mail.from-name}")
     private String fromName;
 
-    private static final String MAILJET_SEND_URL = "https://api.mailjet.com/v3.1/send";
+    @Value("${app.mail.password}")
+    private String appPassword;
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .build();
+    @Value("${app.admin.email}")
+    private String adminEmail;
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    // ─────────────────────────────────────────────────────────────────────────
+    // CORE SMTP SESSION — reused for every send
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private Session buildSession() {
+        Properties props = new Properties();
+        props.put("mail.smtp.auth",            "true");
+        props.put("mail.smtp.starttls.enable", "true");
+        props.put("mail.smtp.starttls.required","true");
+        props.put("mail.smtp.host",            "smtp.gmail.com");
+        props.put("mail.smtp.port",            "587");
+        props.put("mail.smtp.connectiontimeout", "10000");
+        props.put("mail.smtp.timeout",           "15000");
+        props.put("mail.smtp.writetimeout",      "15000");
+
+        return Session.getInstance(props, new Authenticator() {
+            @Override
+            protected PasswordAuthentication getPasswordAuthentication() {
+                return new PasswordAuthentication(fromEmail, appPassword);
+            }
+        });
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // PRIVATE HELPERS
     // ─────────────────────────────────────────────────────────────────────────
 
-    /** Builds Basic Auth header: Base64(apiKey:secretKey) */
-    private String basicAuth() {
-        String credentials = apiKey + ":" + secretKey;
-        return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes());
+    private void send(String to, String toName, String subject, String html) {
+        try {
+            Session session = buildSession();
+            MimeMessage message = new MimeMessage(session);
+
+            message.setFrom(new InternetAddress(fromEmail, fromName, "UTF-8"));
+            message.setRecipient(Message.RecipientType.TO,
+                new InternetAddress(to, toName != null ? toName : to, "UTF-8"));
+            message.setSubject(subject, "UTF-8");
+
+            MimeBodyPart htmlPart = new MimeBodyPart();
+            htmlPart.setContent(wrapInTemplate(html), "text/html; charset=UTF-8");
+
+            Multipart multipart = new MimeMultipart("alternative");
+            multipart.addBodyPart(htmlPart);
+            message.setContent(multipart);
+
+            Transport.send(message);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
+        }
+    }
+
+    private void sendWithReplyTo(String to, String toName,
+                                  String replyTo, String subject, String html) {
+        try {
+            Session session = buildSession();
+            MimeMessage message = new MimeMessage(session);
+
+            message.setFrom(new InternetAddress(fromEmail, fromName, "UTF-8"));
+            message.setRecipient(Message.RecipientType.TO,
+                new InternetAddress(to, toName != null ? toName : to, "UTF-8"));
+            message.setReplyTo(new Address[]{new InternetAddress(replyTo)});
+            message.setSubject(subject, "UTF-8");
+
+            MimeBodyPart htmlPart = new MimeBodyPart();
+            htmlPart.setContent(wrapInTemplate(html), "text/html; charset=UTF-8");
+
+            Multipart multipart = new MimeMultipart("alternative");
+            multipart.addBodyPart(htmlPart);
+            message.setContent(multipart);
+
+            Transport.send(message);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
+        }
     }
 
     private String wrapInTemplate(String bodyContent) {
@@ -66,7 +120,6 @@ public class EmailService {
             "</head>" +
             "<body style='margin:0;padding:0;background:#fdf6ee;" +
             "font-family:Georgia,serif;'>" +
-
             "<table width='100%' cellpadding='0' cellspacing='0'" +
             " style='background:#fdf6ee;padding:36px 16px;'>" +
             "<tr><td align='center'>" +
@@ -78,8 +131,7 @@ public class EmailService {
             " padding:34px 40px;text-align:center;'>" +
             "<div style='font-size:50px;margin-bottom:10px;'>&#x1F64F;</div>" +
             "<h1 style='margin:0;color:#fff;font-size:27px;font-weight:700;" +
-            " letter-spacing:2px;font-family:Georgia,serif;'>" +
-            "Hanuman Sangam</h1>" +
+            " letter-spacing:2px;font-family:Georgia,serif;'>Hanuman Sangam</h1>" +
             "<p style='margin:7px 0 0;color:rgba(255,255,255,0.88);font-size:12px;" +
             " letter-spacing:3px;text-transform:uppercase;" +
             " font-family:Arial,sans-serif;'>&#2404; Jay Shri Ram &#2404;</p>" +
@@ -91,71 +143,21 @@ public class EmailService {
 
             "<tr><td style='background:#fff8f0;padding:16px;text-align:center;" +
             " border-top:1px solid #f0e0cc;border-bottom:1px solid #f0e0cc;'>" +
-            "<span style='color:#e65c00;font-size:18px;letter-spacing:8px;'>" +
-            "~ ~ ~</span>" +
+            "<span style='color:#e65c00;font-size:18px;letter-spacing:8px;'>~ ~ ~</span>" +
             "</td></tr>" +
 
             "<tr><td style='background:#1a0a00;padding:26px 40px;text-align:center;'>" +
             "<p style='margin:0 0 5px;color:#f9a825;font-size:12px;font-weight:700;" +
             " letter-spacing:2px;font-family:Arial,sans-serif;'>HANUMAN SANGAM</p>" +
             "<p style='margin:0 0 4px;color:rgba(255,255,255,0.5);font-size:11px;" +
-            " font-family:Arial,sans-serif;'>" +
-            "This is an automated message — please do not reply.</p>" +
+            " font-family:Arial,sans-serif;'>This is an automated message — please do not reply.</p>" +
             "<p style='margin:0;font-size:11px;font-family:Arial,sans-serif;'>" +
             "<a href='mailto:hanumansangamu@gmail.com'" +
-            " style='color:#f9a825;text-decoration:none;'>" +
-            "hanumansangamu@gmail.com</a></p>" +
+            " style='color:#f9a825;text-decoration:none;'>hanumansangamu@gmail.com</a></p>" +
             "</td></tr>" +
 
             "</table></td></tr></table>" +
             "</body></html>";
-    }
-
-    /**
-     * Core send using Mailjet v3.1 API.
-     * Key differences from Brevo:
-     *   - Uses "Messages" array wrapper
-     *   - "From" instead of "sender"
-     *   - "To" uses "Email"/"Name" (capital E/N)
-     *   - "HTMLPart" instead of "htmlContent"
-     *   - Auth is Basic (apiKey:secretKey), not single api-key header
-     */
-    private void send(String to, String name, String subject, String html) {
-        try {
-            Map<String, Object> message = Map.of(
-                "From",     Map.of("Email", fromEmail, "Name", fromName),
-                "To",       List.of(Map.of(
-                                "Email", to,
-                                "Name",  name != null ? name : to)),
-                "Subject",  subject,
-                "HTMLPart", wrapInTemplate(html)
-            );
-
-            Map<String, Object> payload = Map.of("Messages", List.of(message));
-            String json = objectMapper.writeValueAsString(payload);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(MAILJET_SEND_URL))
-                .timeout(Duration.ofSeconds(15))
-                .header("Accept",        "application/json")
-                .header("Content-Type",  "application/json")
-                .header("Authorization", basicAuth())
-                .POST(HttpRequest.BodyPublishers.ofString(json))
-                .build();
-
-            HttpResponse<String> response =
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new RuntimeException(
-                    "Mailjet API error " + response.statusCode() + ": " + response.body());
-            }
-
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Email send failed: " + e.getMessage(), e);
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -171,8 +173,7 @@ public class EmailService {
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "One-Time Password for Hanuman Sangam Registration</p>" +
 
-            "<p style='margin:0 0 14px;color:#333;font-size:15px;" +
-            " line-height:1.8;'>Dear Member,</p>" +
+            "<p style='margin:0 0 14px;color:#333;font-size:15px;line-height:1.8;'>Dear Member,</p>" +
             "<p style='margin:0 0 26px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "Thank you for joining <strong style='color:#e65c00;'>Hanuman Sangam</strong>! " +
@@ -185,8 +186,8 @@ public class EmailService {
             " letter-spacing:3px;text-transform:uppercase;" +
             " font-family:Arial,sans-serif;'>Your One-Time Password</p>" +
             "<div style='font-size:44px;font-weight:700;color:#e65c00;" +
-            " letter-spacing:14px;font-family:\"Courier New\",monospace;" +
-            " margin:6px 0;'>" + otp + "</div>" +
+            " letter-spacing:14px;font-family:\"Courier New\",monospace;margin:6px 0;'>" +
+            otp + "</div>" +
             "<p style='margin:10px 0 0;color:#999;font-size:12px;" +
             " font-family:Arial,sans-serif;'>" +
             "Valid for <strong>5 minutes</strong> only — do not share</p>" +
@@ -205,8 +206,8 @@ public class EmailService {
             " font-family:Arial,sans-serif;line-height:1.7;'>" +
             "If you did not request this OTP, please ignore this email safely.</p>" +
 
-            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;" +
-            " font-weight:600;'>Jai Bajrang Bali! &#x1F64F;</p>" +
+            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
+            "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
@@ -240,8 +241,7 @@ public class EmailService {
             " padding:26px 20px;text-align:center;margin:0 0 26px;'>" +
             "<h3 style='margin:0 0 8px;color:#1b5e20;font-size:19px;" +
             " font-family:Georgia,serif;'>You are officially a Member!</h3>" +
-            "<p style='margin:0;color:#388e3c;font-size:14px;" +
-            " font-family:Arial,sans-serif;'>" +
+            "<p style='margin:0;color:#388e3c;font-size:14px;font-family:Arial,sans-serif;'>" +
             "Your account is now active and ready to use.</p>" +
             "</div>" +
 
@@ -257,8 +257,8 @@ public class EmailService {
             row("&#x1F64F;", "Participate in <strong>Sangam events</strong> and activities") +
             "</table></div>" +
 
-            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;" +
-            " font-weight:600;'>Jai Bajrang Bali! &#x1F64F;</p>" +
+            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
+            "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
@@ -291,8 +291,7 @@ public class EmailService {
             "<div style='background:#ffebee;border-left:5px solid #c62828;" +
             " border-radius:0 12px 12px 0;padding:20px;margin:0 0 26px;'>" +
             "<p style='margin:0 0 6px;color:#b71c1c;font-size:14px;" +
-            " font-weight:700;font-family:Arial,sans-serif;'>" +
-            "Status: Not Approved</p>" +
+            " font-weight:700;font-family:Arial,sans-serif;'>Status: Not Approved</p>" +
             "<p style='margin:0;color:#c62828;font-size:14px;" +
             " line-height:1.7;font-family:Arial,sans-serif;'>" +
             "Your registration did not meet our current membership criteria. " +
@@ -304,19 +303,18 @@ public class EmailService {
             "<h4 style='margin:0 0 10px;color:#e65c00;font-size:11px;" +
             " letter-spacing:2px;text-transform:uppercase;" +
             " font-family:Arial,sans-serif;'>Need Help?</h4>" +
-            "<p style='margin:0;color:#444;font-size:14px;" +
-            " font-family:Arial,sans-serif;'>" +
+            "<p style='margin:0;color:#444;font-size:14px;font-family:Arial,sans-serif;'>" +
             "Email us at: <a href='mailto:hanumansangamu@gmail.com'" +
-            " style='color:#e65c00;font-weight:600;" +
-            " text-decoration:none;'>hanumansangamu@gmail.com</a></p>" +
+            " style='color:#e65c00;font-weight:600;text-decoration:none;'>" +
+            "hanumansangamu@gmail.com</a></p>" +
             "</div>" +
 
             "<p style='margin:0 0 18px;color:#888;font-size:13px;" +
             " font-family:Arial,sans-serif;line-height:1.7;'>" +
             "We appreciate your interest. You are always welcome to reapply.</p>" +
 
-            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;" +
-            " font-weight:600;'>Jai Bajrang Bali! &#x1F64F;</p>" +
+            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
+            "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
@@ -337,19 +335,18 @@ public class EmailService {
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Important update from Hanuman Sangam</p>" +
 
-            "<p style='margin:0 0 24px;color:#333;font-size:15px;" +
-            " line-height:1.8;'>Dear <strong>" + memberName + "</strong>,</p>" +
+            "<p style='margin:0 0 24px;color:#333;font-size:15px;line-height:1.8;'>" +
+            "Dear <strong>" + memberName + "</strong>,</p>" +
 
             "<div style='background:linear-gradient(135deg,#fff8f0,#fff3e0);" +
-            " border:1px solid #ffccbc;border-radius:14px;" +
-            " padding:28px;margin:0 0 26px;'>" +
+            " border:1px solid #ffccbc;border-radius:14px;padding:28px;margin:0 0 26px;'>" +
             "<div style='color:#333;font-size:15px;line-height:1.9;" +
             " font-family:Arial,sans-serif;white-space:pre-line;'>" +
             announcementBody + "</div>" +
             "</div>" +
 
-            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;" +
-            " font-weight:600;'>Jai Bajrang Bali! &#x1F64F;</p>" +
+            "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
+            "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
@@ -391,53 +388,20 @@ public class EmailService {
             " letter-spacing:2px;text-transform:uppercase;" +
             " font-family:Arial,sans-serif;'>Message</h4>" +
             "<p style='margin:0;color:#333;font-size:15px;" +
-            " line-height:1.9;font-family:Arial,sans-serif;" +
-            " white-space:pre-line;'>" + message + "</p>" +
+            " line-height:1.9;font-family:Arial,sans-serif;white-space:pre-line;'>" +
+            message + "</p>" +
             "</div>" +
 
             "<div style='background:#e8f5e9;border:1px solid #c8e6c9;" +
             " border-radius:10px;padding:14px 18px;'>" +
-            "<p style='margin:0;color:#2e7d32;font-size:13px;" +
-            " font-family:Arial,sans-serif;'>" +
+            "<p style='margin:0;color:#2e7d32;font-size:13px;font-family:Arial,sans-serif;'>" +
             "To reply, email: <a href='mailto:" + replyTo + "'" +
             " style='color:#1b5e20;font-weight:600;text-decoration:none;'>" +
             safeEmail + "</a></p>" +
             "</div>";
 
-        try {
-            Map<String, Object> msg = Map.of(
-                "From",     Map.of("Email", fromEmail, "Name", fromName),
-                "To",       List.of(Map.of("Email", adminEmail, "Name", "Admin")),
-                "ReplyTo",  Map.of("Email", replyTo),
-                "Subject",  "Contact from " + memberName + " — Hanuman Sangam",
-                "HTMLPart", wrapInTemplate(html)
-            );
-
-            Map<String, Object> payload = Map.of("Messages", List.of(msg));
-            String json = objectMapper.writeValueAsString(payload);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(MAILJET_SEND_URL))
-                .timeout(Duration.ofSeconds(15))
-                .header("Accept",        "application/json")
-                .header("Content-Type",  "application/json")
-                .header("Authorization", basicAuth())
-                .POST(HttpRequest.BodyPublishers.ofString(json))
-                .build();
-
-            HttpResponse<String> response =
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new RuntimeException(
-                    "Mailjet API error " + response.statusCode() + ": " + response.body());
-            }
-
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to send contact email: " + e.getMessage(), e);
-        }
+        sendWithReplyTo(adminEmail, "Admin", replyTo,
+            "Contact from " + memberName + " — Hanuman Sangam", html);
     }
 
     private String row(String icon, String text) {

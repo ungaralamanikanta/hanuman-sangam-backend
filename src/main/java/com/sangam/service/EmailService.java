@@ -11,23 +11,33 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.util.List;
+import java.util.Base64;
 import java.util.Map;
 
 /**
- * EmailService — sends transactional emails via Elastic Email REST API (HTTPS/443).
- * Free: 100 emails/day forever, no domain needed, no credit card.
+ * EmailService — sends emails via Gmail REST API using OAuth2.
+ *
+ * Why Gmail OAuth2?
+ *   - Sends directly from hanumansangamu@gmail.com
+ *   - Uses HTTPS port 443 — Render never blocks this
+ *   - Free forever — no limits for personal Gmail
+ *   - No domain needed
+ *   - No third party service
+ *   - Permanent — refresh token never expires
  */
 @Service
 public class EmailService {
 
     private static final Logger log = LoggerFactory.getLogger(EmailService.class);
 
-    @Value("${elasticemail.api.key}")
-    private String apiKey;
+    @Value("${gmail.client.id}")
+    private String clientId;
 
-    @Value("${app.admin.email}")
-    private String adminEmail;
+    @Value("${gmail.client.secret}")
+    private String clientSecret;
+
+    @Value("${gmail.refresh.token}")
+    private String refreshToken;
 
     @Value("${app.mail.from}")
     private String fromEmail;
@@ -35,17 +45,48 @@ public class EmailService {
     @Value("${app.mail.from-name}")
     private String fromName;
 
-    private static final String ELASTIC_SEND_URL = "https://api.elasticemail.com/v4/emails/transactional";
-    private static final int    MAX_RETRIES       = 3;
+    @Value("${app.admin.email}")
+    private String adminEmail;
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
+    private static final String TOKEN_URL   = "https://oauth2.googleapis.com/token";
+    private static final String GMAIL_URL   = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+    private static final int    MAX_RETRIES = 3;
+
+    private final HttpClient   httpClient   = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .build();
-
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // ─────────────────────────────────────────────────────────────────────────
-    // CORE SEND WITH RETRY
+    // GET FRESH ACCESS TOKEN
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private String getAccessToken() throws Exception {
+        String body = "client_id=" + clientId +
+                      "&client_secret=" + clientSecret +
+                      "&refresh_token=" + refreshToken +
+                      "&grant_type=refresh_token";
+
+        HttpRequest request = HttpRequest.newBuilder()
+            .uri(URI.create(TOKEN_URL))
+            .timeout(Duration.ofSeconds(15))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .POST(HttpRequest.BodyPublishers.ofString(body))
+            .build();
+
+        HttpResponse<String> response =
+            httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() != 200) {
+            throw new RuntimeException("Failed to get access token: " + response.body());
+        }
+
+        Map<?, ?> json = objectMapper.readValue(response.body(), Map.class);
+        return (String) json.get("access_token");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CORE SEND
     // ─────────────────────────────────────────────────────────────────────────
 
     private void send(String to, String subject, String html) {
@@ -57,19 +98,19 @@ public class EmailService {
 
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
-                Map<String, Object> body = Map.of(
-                    "Recipients", Map.of("To", List.of(to)),
-                    "Content",    buildContent(subject, html, replyTo)
-                );
+                String accessToken = getAccessToken();
+                String rawEmail    = buildRawEmail(to, subject, html, replyTo);
+                String encoded     = Base64.getUrlEncoder()
+                                           .encodeToString(rawEmail.getBytes("UTF-8"));
 
-                String json = objectMapper.writeValueAsString(body);
+                String payload = "{\"raw\":\"" + encoded + "\"}";
 
                 HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(ELASTIC_SEND_URL))
+                    .uri(URI.create(GMAIL_URL))
                     .timeout(Duration.ofSeconds(20))
-                    .header("Content-Type",          "application/json")
-                    .header("X-ElasticEmail-ApiKey", apiKey)
-                    .POST(HttpRequest.BodyPublishers.ofString(json))
+                    .header("Authorization", "Bearer " + accessToken)
+                    .header("Content-Type",  "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload))
                     .build();
 
                 HttpResponse<String> response =
@@ -80,13 +121,8 @@ public class EmailService {
                     return;
                 }
 
-                String error = "Elastic Email error " + response.statusCode() + ": " + response.body();
+                String error = "Gmail API error " + response.statusCode() + ": " + response.body();
                 log.warn("Attempt {}/{} failed: {}", attempt, MAX_RETRIES, error);
-
-                if (response.statusCode() == 401 || response.statusCode() == 403) {
-                    throw new RuntimeException(error);
-                }
-
                 lastException = new RuntimeException(error);
 
             } catch (RuntimeException e) {
@@ -106,22 +142,20 @@ public class EmailService {
             (lastException != null ? lastException.getMessage() : "unknown"));
     }
 
-    private Map<String, Object> buildContent(String subject, String html, String replyTo) {
+    private String buildRawEmail(String to, String subject, String html,
+                                  String replyTo) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        sb.append("From: ").append(fromName).append(" <").append(fromEmail).append(">\r\n");
+        sb.append("To: ").append(to).append("\r\n");
         if (replyTo != null) {
-            return Map.of(
-                "From",    fromEmail,
-                "FromName", fromName,
-                "ReplyTo", replyTo,
-                "Subject", subject,
-                "Body",    List.of(Map.of("ContentType", "HTML", "Content", wrapInTemplate(html)))
-            );
+            sb.append("Reply-To: ").append(replyTo).append("\r\n");
         }
-        return Map.of(
-            "From",    fromEmail,
-            "FromName", fromName,
-            "Subject", subject,
-            "Body",    List.of(Map.of("ContentType", "HTML", "Content", wrapInTemplate(html)))
-        );
+        sb.append("Subject: ").append(subject).append("\r\n");
+        sb.append("MIME-Version: 1.0\r\n");
+        sb.append("Content-Type: text/html; charset=UTF-8\r\n");
+        sb.append("\r\n");
+        sb.append(wrapInTemplate(html));
+        return sb.toString();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -191,7 +225,7 @@ public class EmailService {
             "<p style='margin:0 0 26px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "Thank you for joining <strong style='color:#e65c00;'>Hanuman Sangam</strong>! " +
-            "Use the OTP below to verify your email.</p>" +
+            "Use the OTP below to verify your email and complete your registration.</p>" +
             "<div style='background:linear-gradient(135deg,#fff8f0,#fff3e0);" +
             " border:2px dashed #e65c00;border-radius:14px;" +
             " padding:30px 20px;text-align:center;margin:0 0 26px;'>" +
@@ -208,9 +242,12 @@ public class EmailService {
             " border-radius:0 10px 10px 0;padding:14px 18px;margin:0 0 22px;'>" +
             "<p style='margin:0;color:#7a5c00;font-size:13px;" +
             " line-height:1.7;font-family:Arial,sans-serif;'>" +
-            "<strong>Security Notice:</strong> Hanuman Sangam will never ask for your OTP. " +
-            "Do not share it with anyone.</p>" +
+            "<strong>Security Notice:</strong> Hanuman Sangam will " +
+            "<strong>never</strong> ask for your OTP. Do not share it with anyone.</p>" +
             "</div>" +
+            "<p style='margin:0 0 20px;color:#888;font-size:13px;" +
+            " font-family:Arial,sans-serif;line-height:1.7;'>" +
+            "If you did not request this OTP, please ignore this email safely.</p>" +
             "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
             "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
@@ -245,8 +282,7 @@ public class EmailService {
             "<h3 style='margin:0 0 8px;color:#1b5e20;font-size:19px;" +
             " font-family:Georgia,serif;'>You are officially a Member!</h3>" +
             "<p style='margin:0;color:#388e3c;font-size:14px;font-family:Arial,sans-serif;'>" +
-            "Your account is now active and ready to use.</p>" +
-            "</div>" +
+            "Your account is now active and ready to use.</p></div>" +
             "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
             "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
@@ -273,12 +309,8 @@ public class EmailService {
             "<p style='margin:0 0 24px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "After careful review, your membership request has " +
-            "<strong style='color:#c62828;'>not been approved</strong> at this time.</p>" +
-            "<div style='background:#ffebee;border-left:5px solid #c62828;" +
-            " border-radius:0 12px 12px 0;padding:20px;margin:0 0 26px;'>" +
-            "<p style='margin:0;color:#c62828;font-size:14px;font-family:Arial,sans-serif;'>" +
+            "<strong style='color:#c62828;'>not been approved</strong> at this time. " +
             "Please contact admin at hanumansangamu@gmail.com for clarification.</p>" +
-            "</div>" +
             "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
             "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +

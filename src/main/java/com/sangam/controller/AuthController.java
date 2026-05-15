@@ -13,7 +13,6 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/auth")
-// ── FIX (Bug 10): Removed @CrossOrigin — rely solely on SecurityConfig CORS ──
 public class AuthController {
 
     private final AuthService  authService;
@@ -24,19 +23,15 @@ public class AuthController {
         this.emailService = emailService;
     }
 
-    // ── Send OTP ──────────────────────────────────────────────────
+    // ── Send OTP (Registration) ───────────────────────────────────
     @PostMapping("/send-otp")
     public ResponseEntity<?> sendOtp(@RequestBody Map<String, String> body) {
         try {
-            // ── FIX (Bug 2): Validate email before passing to service ──
             String email = body.get("email");
-            if (email == null || email.isBlank()) {
-                return ResponseEntity.badRequest()
-                    .body(Map.of("error", "Email is required."));
-            }
+            if (email == null || email.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "Email is required."));
             return ResponseEntity.ok(
-                Map.of("message", authService.sendOtp(email.trim().toLowerCase()))
-            );
+                Map.of("message", authService.sendOtp(email.trim().toLowerCase())));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
@@ -47,8 +42,7 @@ public class AuthController {
     public ResponseEntity<?> verifyOtp(@RequestBody OtpRequest req) {
         try {
             return ResponseEntity.ok(
-                Map.of("message", authService.verifyOtp(req.getEmail(), req.getOtp()))
-            );
+                Map.of("message", authService.verifyOtp(req.getEmail(), req.getOtp())));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
@@ -58,9 +52,7 @@ public class AuthController {
     @PostMapping("/register")
     public ResponseEntity<?> register(@RequestBody RegisterRequest req) {
         try {
-            return ResponseEntity.ok(
-                Map.of("message", authService.register(req))
-            );
+            return ResponseEntity.ok(Map.of("message", authService.register(req)));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
@@ -70,8 +62,8 @@ public class AuthController {
     @PostMapping("/member-login")
     public ResponseEntity<?> memberLogin(@RequestBody LoginRequest req) {
         try {
-            LoginResponse res = authService.memberLogin(req.getPhoneNumber(), req.getPassword());
-            return ResponseEntity.ok(res);
+            return ResponseEntity.ok(
+                authService.memberLogin(req.getPhoneNumber(), req.getPassword()));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
@@ -81,8 +73,8 @@ public class AuthController {
     @PostMapping("/admin-login")
     public ResponseEntity<?> adminLogin(@RequestBody LoginRequest req) {
         try {
-            LoginResponse res = authService.adminLogin(req.getPhoneNumber(), req.getPassword());
-            return ResponseEntity.ok(res);
+            return ResponseEntity.ok(
+                authService.adminLogin(req.getPhoneNumber(), req.getPassword()));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
@@ -96,18 +88,66 @@ public class AuthController {
             String email   = body.getOrDefault("email",   "");
             String phone   = body.getOrDefault("phone",   "");
             String message = body.getOrDefault("message", "");
-
-            if (message.isBlank()) {
-                return ResponseEntity.badRequest()
-                    .body(Map.of("error", "Message cannot be empty."));
-            }
-
+            if (message.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "Message cannot be empty."));
             emailService.sendContactMessageToAdmin(name, email, phone, message);
             return ResponseEntity.ok(Map.of("message", "Message sent to admin successfully!"));
-
         } catch (Exception e) {
             return ResponseEntity.badRequest()
                 .body(Map.of("error", "Failed to send message: " + e.getMessage()));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // FORGOT PASSWORD — by Email (3 steps)
+    // ─────────────────────────────────────────────────────────────
+
+    // Step 1 — Send OTP to the email provided
+    @PostMapping("/forgot-password/send-otp")
+    public ResponseEntity<?> forgotPasswordSendOtp(@RequestBody Map<String, String> body) {
+        try {
+            String email = body.get("email");
+            if (email == null || email.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "Email is required."));
+            return ResponseEntity.ok(
+                Map.of("message", authService.forgotPasswordSendOtp(email.trim().toLowerCase())));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    // Step 2 — Verify OTP
+    @PostMapping("/forgot-password/verify-otp")
+    public ResponseEntity<?> forgotPasswordVerifyOtp(@RequestBody Map<String, String> body) {
+        try {
+            String email = body.get("email");
+            String otp   = body.get("otp");
+            if (email == null || otp == null)
+                return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Email and OTP are required."));
+            return ResponseEntity.ok(
+                Map.of("message", authService.forgotPasswordVerifyOtp(email.trim().toLowerCase(), otp.trim())));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    // Step 3 — Set new password
+    @PostMapping("/forgot-password/reset")
+    public ResponseEntity<?> resetPassword(@RequestBody Map<String, String> body) {
+        try {
+            String email       = body.get("email");
+            String newPassword = body.get("newPassword");
+            if (email == null || newPassword == null || newPassword.isBlank())
+                return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Email and new password are required."));
+            if (newPassword.length() < 6)
+                return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Password must be at least 6 characters."));
+            return ResponseEntity.ok(
+                Map.of("message", authService.resetPassword(email.trim().toLowerCase(), newPassword)));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
 }

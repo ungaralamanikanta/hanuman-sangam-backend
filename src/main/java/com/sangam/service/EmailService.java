@@ -15,26 +15,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * EmailService — sends transactional emails via Brevo REST API (HTTPS/443).
- *
- * Why Brevo REST API?
- *   - Render.com blocks all SMTP ports (25, 465, 587)
- *   - HTTPS port 443 is never blocked
- *   - Free 300 emails/day forever
- *   - No domain required
- *
- * Improvements:
- *   - Retry logic (3 attempts) for transient failures
- *   - Proper logging for debugging
- *   - Null safety on all inputs
- *   - Timeout tuning for Render's cold starts
+ * EmailService — sends transactional emails via Elastic Email REST API (HTTPS/443).
+ * Free: 100 emails/day forever, no domain needed, no credit card.
  */
 @Service
 public class EmailService {
 
     private static final Logger log = LoggerFactory.getLogger(EmailService.class);
 
-    @Value("${brevo.api.key}")
+    @Value("${elasticemail.api.key}")
     private String apiKey;
 
     @Value("${app.admin.email}")
@@ -46,9 +35,8 @@ public class EmailService {
     @Value("${app.mail.from-name}")
     private String fromName;
 
-    private static final String BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email";
-    private static final int    MAX_RETRIES    = 3;
-    private static final long   RETRY_DELAY_MS = 1000;
+    private static final String ELASTIC_SEND_URL = "https://api.elasticemail.com/v4/emails/transactional";
+    private static final int    MAX_RETRIES       = 3;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
@@ -60,46 +48,27 @@ public class EmailService {
     // CORE SEND WITH RETRY
     // ─────────────────────────────────────────────────────────────────────────
 
-    private void send(String to, String name, String subject, String html) {
-        send(to, name, subject, html, null);
+    private void send(String to, String subject, String html) {
+        send(to, subject, html, null);
     }
 
-    private void send(String to, String name, String subject, String html, String replyTo) {
-        if (isBlank(to)) {
-            throw new RuntimeException("Recipient email is required.");
-        }
-
+    private void send(String to, String subject, String html, String replyTo) {
         Exception lastException = null;
 
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
-                Map<String, Object> payload;
+                Map<String, Object> body = Map.of(
+                    "Recipients", Map.of("To", List.of(to)),
+                    "Content",    buildContent(subject, html, replyTo)
+                );
 
-                if (replyTo != null) {
-                    payload = Map.of(
-                        "sender",      Map.of("name", fromName, "email", fromEmail),
-                        "to",          List.of(Map.of("email", to, "name", name != null ? name : to)),
-                        "replyTo",     Map.of("email", replyTo),
-                        "subject",     subject,
-                        "htmlContent", wrapInTemplate(html)
-                    );
-                } else {
-                    payload = Map.of(
-                        "sender",      Map.of("name", fromName, "email", fromEmail),
-                        "to",          List.of(Map.of("email", to, "name", name != null ? name : to)),
-                        "subject",     subject,
-                        "htmlContent", wrapInTemplate(html)
-                    );
-                }
-
-                String json = objectMapper.writeValueAsString(payload);
+                String json = objectMapper.writeValueAsString(body);
 
                 HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(BREVO_SEND_URL))
+                    .uri(URI.create(ELASTIC_SEND_URL))
                     .timeout(Duration.ofSeconds(20))
-                    .header("Accept",       "application/json")
-                    .header("Content-Type", "application/json")
-                    .header("api-key",      apiKey)
+                    .header("Content-Type",          "application/json")
+                    .header("X-ElasticEmail-ApiKey", apiKey)
                     .POST(HttpRequest.BodyPublishers.ofString(json))
                     .build();
 
@@ -107,14 +76,13 @@ public class EmailService {
                     httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
                 if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                    log.info("Email sent successfully to {} (attempt {})", to, attempt);
+                    log.info("Email sent to {} (attempt {})", to, attempt);
                     return;
                 }
 
-                String error = "Brevo API error " + response.statusCode() + ": " + response.body();
-                log.warn("Email attempt {}/{} failed: {}", attempt, MAX_RETRIES, error);
+                String error = "Elastic Email error " + response.statusCode() + ": " + response.body();
+                log.warn("Attempt {}/{} failed: {}", attempt, MAX_RETRIES, error);
 
-                // 401/403 = auth error, no point retrying
                 if (response.statusCode() == 401 || response.statusCode() == 403) {
                     throw new RuntimeException(error);
                 }
@@ -124,22 +92,36 @@ public class EmailService {
             } catch (RuntimeException e) {
                 throw e;
             } catch (Exception e) {
-                log.warn("Email attempt {}/{} exception: {}", attempt, MAX_RETRIES, e.getMessage());
+                log.warn("Attempt {}/{} exception: {}", attempt, MAX_RETRIES, e.getMessage());
                 lastException = e;
             }
 
-            // Wait before retrying
             if (attempt < MAX_RETRIES) {
-                try {
-                    Thread.sleep(RETRY_DELAY_MS * attempt);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
+                try { Thread.sleep(1000L * attempt); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
             }
         }
 
-        throw new RuntimeException("Email send failed after " + MAX_RETRIES +
-            " attempts: " + (lastException != null ? lastException.getMessage() : "unknown error"));
+        throw new RuntimeException("Email failed after " + MAX_RETRIES + " attempts: " +
+            (lastException != null ? lastException.getMessage() : "unknown"));
+    }
+
+    private Map<String, Object> buildContent(String subject, String html, String replyTo) {
+        if (replyTo != null) {
+            return Map.of(
+                "From",    fromEmail,
+                "FromName", fromName,
+                "ReplyTo", replyTo,
+                "Subject", subject,
+                "Body",    List.of(Map.of("ContentType", "HTML", "Content", wrapInTemplate(html)))
+            );
+        }
+        return Map.of(
+            "From",    fromEmail,
+            "FromName", fromName,
+            "Subject", subject,
+            "Body",    List.of(Map.of("ContentType", "HTML", "Content", wrapInTemplate(html)))
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -193,7 +175,7 @@ public class EmailService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 1. OTP VERIFICATION
+    // 1. OTP
     // ─────────────────────────────────────────────────────────────────────────
 
     public void sendOtp(String toEmail, String otp) {
@@ -205,13 +187,11 @@ public class EmailService {
             " text-transform:uppercase;font-family:Arial,sans-serif;" +
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "One-Time Password for Hanuman Sangam Registration</p>" +
-
             "<p style='margin:0 0 14px;color:#333;font-size:15px;line-height:1.8;'>Dear Member,</p>" +
             "<p style='margin:0 0 26px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "Thank you for joining <strong style='color:#e65c00;'>Hanuman Sangam</strong>! " +
-            "Use the OTP below to verify your email and complete your registration.</p>" +
-
+            "Use the OTP below to verify your email.</p>" +
             "<div style='background:linear-gradient(135deg,#fff8f0,#fff3e0);" +
             " border:2px dashed #e65c00;border-radius:14px;" +
             " padding:30px 20px;text-align:center;margin:0 0 26px;'>" +
@@ -224,51 +204,41 @@ public class EmailService {
             "<p style='margin:10px 0 0;color:#999;font-size:12px;font-family:Arial,sans-serif;'>" +
             "Valid for <strong>5 minutes</strong> only — do not share</p>" +
             "</div>" +
-
             "<div style='background:#fff8e1;border-left:4px solid #f9a825;" +
             " border-radius:0 10px 10px 0;padding:14px 18px;margin:0 0 22px;'>" +
             "<p style='margin:0;color:#7a5c00;font-size:13px;" +
             " line-height:1.7;font-family:Arial,sans-serif;'>" +
-            "<strong>Security Notice:</strong> Hanuman Sangam will " +
-            "<strong>never</strong> ask for your OTP over phone or email. " +
+            "<strong>Security Notice:</strong> Hanuman Sangam will never ask for your OTP. " +
             "Do not share it with anyone.</p>" +
             "</div>" +
-
-            "<p style='margin:0 0 20px;color:#888;font-size:13px;" +
-            " font-family:Arial,sans-serif;line-height:1.7;'>" +
-            "If you did not request this OTP, please ignore this email safely.</p>" +
-
             "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
             "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, null, "Hanuman Sangam — Email Verification Code", html);
+        send(toEmail, "Hanuman Sangam — Email Verification Code", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 2. MEMBERSHIP APPROVED
+    // 2. APPROVED
     // ─────────────────────────────────────────────────────────────────────────
 
     public void sendApprovalNotification(String toEmail, String memberName) {
-        log.info("Sending approval notification to {}", toEmail);
+        log.info("Sending approval to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#2e7d32;font-size:21px;" +
             " font-family:Georgia,serif;'>Membership Approved! &#x2705;</h2>" +
-            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;letter-spacing:1px;" +
+            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;" +
             " text-transform:uppercase;font-family:Arial,sans-serif;" +
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Welcome to the Hanuman Sangam Family</p>" +
-
             "<p style='margin:0 0 14px;color:#333;font-size:15px;line-height:1.8;'>" +
             "Dear <strong>" + memberName + "</strong>,</p>" +
             "<p style='margin:0 0 24px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
-            "We are thrilled to inform you that your membership request for " +
-            "<strong style='color:#e65c00;'>Hanuman Sangam</strong> has been " +
-            "<strong style='color:#2e7d32;'>APPROVED</strong> by our admin. " +
+            "Your membership for <strong style='color:#e65c00;'>Hanuman Sangam</strong> has been " +
+            "<strong style='color:#2e7d32;'>APPROVED</strong>! " +
             "You are now an official member of our sacred community!</p>" +
-
             "<div style='background:linear-gradient(135deg,#e8f5e9,#c8e6c9);" +
             " border:1px solid #a5d6a7;border-radius:14px;" +
             " padding:26px 20px;text-align:center;margin:0 0 26px;'>" +
@@ -277,82 +247,44 @@ public class EmailService {
             "<p style='margin:0;color:#388e3c;font-size:14px;font-family:Arial,sans-serif;'>" +
             "Your account is now active and ready to use.</p>" +
             "</div>" +
-
-            "<div style='background:#fafafa;border:1px solid #f0e0cc;" +
-            " border-radius:12px;padding:22px;margin:0 0 22px;'>" +
-            "<h4 style='margin:0 0 14px;color:#e65c00;font-size:11px;" +
-            " letter-spacing:2px;text-transform:uppercase;" +
-            " font-family:Arial,sans-serif;'>What Can You Do Now?</h4>" +
-            "<table cellpadding='0' cellspacing='0' width='100%'>" +
-            row("&#x1F510;", "Login with your <strong>mobile number</strong> and password") +
-            row("&#x1F4CB;", "Access your personal <strong>member dashboard</strong>") +
-            row("&#x1F514;", "Receive <strong>community announcements</strong> and updates") +
-            row("&#x1F64F;", "Participate in <strong>Sangam events</strong> and activities") +
-            "</table></div>" +
-
             "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
             "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName, "Membership Approved — Welcome to Hanuman Sangam!", html);
+        send(toEmail, "Membership Approved — Welcome to Hanuman Sangam!", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 3. MEMBERSHIP REJECTED
+    // 3. REJECTED
     // ─────────────────────────────────────────────────────────────────────────
 
     public void sendRejectionNotification(String toEmail, String memberName) {
-        log.info("Sending rejection notification to {}", toEmail);
+        log.info("Sending rejection to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#c62828;font-size:21px;" +
             " font-family:Georgia,serif;'>Membership Status Update</h2>" +
-            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;letter-spacing:1px;" +
+            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;" +
             " text-transform:uppercase;font-family:Arial,sans-serif;" +
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Regarding your Hanuman Sangam registration</p>" +
-
             "<p style='margin:0 0 14px;color:#333;font-size:15px;line-height:1.8;'>" +
             "Dear <strong>" + memberName + "</strong>,</p>" +
             "<p style='margin:0 0 24px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
-            "Thank you for your interest in joining " +
-            "<strong style='color:#e65c00;'>Hanuman Sangam</strong>. " +
-            "After careful review, we regret to inform you that your membership " +
-            "request has <strong style='color:#c62828;'>not been approved</strong> " +
-            "at this time.</p>" +
-
+            "After careful review, your membership request has " +
+            "<strong style='color:#c62828;'>not been approved</strong> at this time.</p>" +
             "<div style='background:#ffebee;border-left:5px solid #c62828;" +
             " border-radius:0 12px 12px 0;padding:20px;margin:0 0 26px;'>" +
-            "<p style='margin:0 0 6px;color:#b71c1c;font-size:14px;" +
-            " font-weight:700;font-family:Arial,sans-serif;'>Status: Not Approved</p>" +
-            "<p style='margin:0;color:#c62828;font-size:14px;" +
-            " line-height:1.7;font-family:Arial,sans-serif;'>" +
-            "Your registration did not meet our current membership criteria. " +
-            "Please contact the admin for further clarification.</p>" +
+            "<p style='margin:0;color:#c62828;font-size:14px;font-family:Arial,sans-serif;'>" +
+            "Please contact admin at hanumansangamu@gmail.com for clarification.</p>" +
             "</div>" +
-
-            "<div style='background:#fafafa;border:1px solid #f0e0cc;" +
-            " border-radius:12px;padding:20px;margin:0 0 22px;'>" +
-            "<h4 style='margin:0 0 10px;color:#e65c00;font-size:11px;" +
-            " letter-spacing:2px;text-transform:uppercase;" +
-            " font-family:Arial,sans-serif;'>Need Help?</h4>" +
-            "<p style='margin:0;color:#444;font-size:14px;font-family:Arial,sans-serif;'>" +
-            "Email us at: <a href='mailto:hanumansangamu@gmail.com'" +
-            " style='color:#e65c00;font-weight:600;text-decoration:none;'>" +
-            "hanumansangamu@gmail.com</a></p>" +
-            "</div>" +
-
-            "<p style='margin:0 0 18px;color:#888;font-size:13px;" +
-            " font-family:Arial,sans-serif;line-height:1.7;'>" +
-            "We appreciate your interest. You are always welcome to reapply.</p>" +
-
             "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
             "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName, "Membership Status Update — Hanuman Sangam", html);
+        send(toEmail, "Membership Status Update — Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -361,40 +293,36 @@ public class EmailService {
 
     public void sendAnnouncementEmail(String toEmail, String memberName,
                                       String title, String announcementBody) {
-        log.info("Sending announcement '{}' to {}", title, toEmail);
+        log.info("Sending announcement to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
             " font-family:Georgia,serif;'>&#x1F4E2; " + title + "</h2>" +
-            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;letter-spacing:1px;" +
+            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;" +
             " text-transform:uppercase;font-family:Arial,sans-serif;" +
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Important update from Hanuman Sangam</p>" +
-
             "<p style='margin:0 0 24px;color:#333;font-size:15px;line-height:1.8;'>" +
             "Dear <strong>" + memberName + "</strong>,</p>" +
-
             "<div style='background:linear-gradient(135deg,#fff8f0,#fff3e0);" +
             " border:1px solid #ffccbc;border-radius:14px;padding:28px;margin:0 0 26px;'>" +
             "<div style='color:#333;font-size:15px;line-height:1.9;" +
             " font-family:Arial,sans-serif;white-space:pre-line;'>" +
-            announcementBody + "</div>" +
-            "</div>" +
-
+            announcementBody + "</div></div>" +
             "<p style='margin:0 0 2px;color:#e65c00;font-size:16px;font-weight:600;'>" +
             "Jai Bajrang Bali! &#x1F64F;</p>" +
             "<p style='margin:0;color:#aaa;font-size:12px;" +
             " font-family:Arial,sans-serif;'>Hanuman Sangam Team</p>";
 
-        send(toEmail, memberName, title + " — Hanuman Sangam", html);
+        send(toEmail, title + " — Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 5. CONTACT MESSAGE → ADMIN
+    // 5. CONTACT → ADMIN
     // ─────────────────────────────────────────────────────────────────────────
 
     public void sendContactMessageToAdmin(String memberName, String memberEmail,
                                           String memberPhone, String message) {
-        log.info("Sending contact message from {} to admin", memberName);
+        log.info("Sending contact from {} to admin", memberName);
         String safeEmail = isBlank(memberEmail) ? "Not provided" : memberEmail;
         String safePhone = isBlank(memberPhone) ? "Not provided" : memberPhone;
         String replyTo   = isBlank(memberEmail) ? adminEmail : memberEmail;
@@ -402,51 +330,24 @@ public class EmailService {
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
             " font-family:Georgia,serif;'>&#x1F4E9; New Contact Message</h2>" +
-            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;letter-spacing:1px;" +
+            "<p style='margin:0 0 26px;color:#bbb;font-size:11px;" +
             " text-transform:uppercase;font-family:Arial,sans-serif;" +
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Received via Hanuman Sangam Member Portal</p>" +
-
             "<div style='background:#fafafa;border:1px solid #f0e0cc;" +
             " border-radius:12px;padding:20px;margin:0 0 22px;'>" +
-            "<h4 style='margin:0 0 14px;color:#e65c00;font-size:11px;" +
-            " letter-spacing:2px;text-transform:uppercase;" +
-            " font-family:Arial,sans-serif;'>Member Details</h4>" +
             "<table cellpadding='0' cellspacing='8' width='100%'>" +
             infoRow("Name",  memberName) +
             infoRow("Email", safeEmail) +
             infoRow("Phone", safePhone) +
             "</table></div>" +
-
             "<div style='background:#fff8f0;border-left:5px solid #e65c00;" +
             " border-radius:0 12px 12px 0;padding:20px;margin:0 0 22px;'>" +
-            "<h4 style='margin:0 0 12px;color:#e65c00;font-size:11px;" +
-            " letter-spacing:2px;text-transform:uppercase;" +
-            " font-family:Arial,sans-serif;'>Message</h4>" +
             "<p style='margin:0;color:#333;font-size:15px;" +
             " line-height:1.9;font-family:Arial,sans-serif;white-space:pre-line;'>" +
-            message + "</p>" +
-            "</div>" +
+            message + "</p></div>";
 
-            "<div style='background:#e8f5e9;border:1px solid #c8e6c9;" +
-            " border-radius:10px;padding:14px 18px;'>" +
-            "<p style='margin:0;color:#2e7d32;font-size:13px;font-family:Arial,sans-serif;'>" +
-            "To reply, email: <a href='mailto:" + replyTo + "'" +
-            " style='color:#1b5e20;font-weight:600;text-decoration:none;'>" +
-            safeEmail + "</a></p>" +
-            "</div>";
-
-        send(adminEmail, "Admin", "Contact from " + memberName + " — Hanuman Sangam", html, replyTo);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // HELPERS
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private String row(String icon, String text) {
-        return "<tr><td style='padding:7px 0;color:#444;font-size:14px;" +
-               " font-family:Arial,sans-serif;line-height:1.6;'>" +
-               icon + "&nbsp; " + text + "</td></tr>";
+        send(adminEmail, "Contact from " + memberName + " — Hanuman Sangam", html, replyTo);
     }
 
     private String infoRow(String label, String value) {

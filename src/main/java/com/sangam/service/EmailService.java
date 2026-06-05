@@ -1,32 +1,18 @@
 package com.sangam.service;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
-import java.util.Base64;
-import java.util.Map;
+import jakarta.mail.internet.MimeMessage;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.mail.javamail.MimeMessageHelper;
 
 @Service
 public class EmailService {
 
     private static final Logger log = LoggerFactory.getLogger(EmailService.class);
-
-    @Value("${gmail.client.id}")
-    private String clientId;
-
-    @Value("${gmail.client.secret}")
-    private String clientSecret;
-
-    @Value("${gmail.refresh.token}")
-    private String refreshToken;
 
     @Value("${app.mail.from}")
     private String fromEmail;
@@ -37,15 +23,16 @@ public class EmailService {
     @Value("${app.admin.email}")
     private String adminEmail;
 
-    private static final String TOKEN_URL   = "https://oauth2.googleapis.com/token";
-    private static final String GMAIL_URL   = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
-    private static final int    MAX_RETRIES = 3;
+   
+private static final Logger log =
+        LoggerFactory.getLogger(EmailService.class);
 
-    private final HttpClient   httpClient   = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(15))
-            .build();
-    private final ObjectMapper objectMapper = new ObjectMapper();
+private final JavaMailSender mailSender;
 
+public EmailService(JavaMailSender mailSender) {
+    this.mailSender = mailSender;
+}
+    
     // ─────────────────────────────────────────────────────────────
     // GET FRESH ACCESS TOKEN
     // ─────────────────────────────────────────────────────────────
@@ -77,72 +64,46 @@ public class EmailService {
     // CORE SEND WITH RETRY
     // ─────────────────────────────────────────────────────────────
 
-    private void send(String to, String subject, String html) {
-        send(to, subject, html, null);
-    }
+   private void send(String to, String subject, String html) {
+    send(to, subject, html, null);
+}
 
-    private void send(String to, String subject, String html, String replyTo) {
-        Exception lastException = null;
+private void send(String to,
+                  String subject,
+                  String html,
+                  String replyTo) {
 
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            try {
-                String accessToken = getAccessToken();
-                String rawEmail    = buildRawEmail(to, subject, html, replyTo);
-                String encoded     = Base64.getUrlEncoder()
-                                           .encodeToString(rawEmail.getBytes("UTF-8"));
+    try {
 
-                String payload = "{\"raw\":\"" + encoded + "\"}";
+        MimeMessage message =
+                mailSender.createMimeMessage();
 
-                HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(GMAIL_URL))
-                    .timeout(Duration.ofSeconds(20))
-                    .header("Authorization", "Bearer " + accessToken)
-                    .header("Content-Type",  "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(payload))
-                    .build();
+        MimeMessageHelper helper =
+                new MimeMessageHelper(message, true, "UTF-8");
 
-                HttpResponse<String> response =
-                    httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        helper.setFrom(fromEmail, fromName);
+        helper.setTo(to);
+        helper.setSubject(subject);
+        helper.setText(wrapInTemplate(html), true);
 
-                if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                    log.info("Email sent to {} (attempt {})", to, attempt);
-                    return;
-                }
-
-                String error = "Gmail API error " + response.statusCode() + ": " + response.body();
-                log.warn("Attempt {}/{} failed: {}", attempt, MAX_RETRIES, error);
-                lastException = new RuntimeException(error);
-
-            } catch (RuntimeException e) {
-                throw e;
-            } catch (Exception e) {
-                log.warn("Attempt {}/{} exception: {}", attempt, MAX_RETRIES, e.getMessage());
-                lastException = e;
-            }
-
-            if (attempt < MAX_RETRIES) {
-                try { Thread.sleep(1000L * attempt); }
-                catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-            }
+        if (replyTo != null && !replyTo.isBlank()) {
+            helper.setReplyTo(replyTo);
         }
 
-        throw new RuntimeException("Email failed after " + MAX_RETRIES + " attempts: " +
-            (lastException != null ? lastException.getMessage() : "unknown"));
-    }
+        mailSender.send(message);
 
-    private String buildRawEmail(String to, String subject, String html,
-                                  String replyTo) throws Exception {
-        StringBuilder sb = new StringBuilder();
-        sb.append("From: ").append(fromName).append(" <").append(fromEmail).append(">\r\n");
-        sb.append("To: ").append(to).append("\r\n");
-        if (replyTo != null) sb.append("Reply-To: ").append(replyTo).append("\r\n");
-        sb.append("Subject: ").append(subject).append("\r\n");
-        sb.append("MIME-Version: 1.0\r\n");
-        sb.append("Content-Type: text/html; charset=UTF-8\r\n");
-        sb.append("\r\n");
-        sb.append(wrapInTemplate(html));
-        return sb.toString();
+        log.info("Email sent successfully to {}", to);
+
+    } catch (Exception e) {
+
+        log.error("Email send failed", e);
+
+        throw new RuntimeException(
+                "Failed to send email: " + e.getMessage(),
+                e
+        );
     }
+}
 
     // ─────────────────────────────────────────────────────────────
     // HTML TEMPLATE

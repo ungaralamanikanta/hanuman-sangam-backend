@@ -12,7 +12,8 @@ import org.springframework.mail.javamail.MimeMessageHelper;
 @Service
 public class EmailService {
 
-    private static final Logger log = LoggerFactory.getLogger(EmailService.class);
+    private static final Logger log =
+            LoggerFactory.getLogger(EmailService.class);
 
     @Value("${app.mail.from}")
     private String fromEmail;
@@ -23,42 +24,12 @@ public class EmailService {
     @Value("${app.admin.email}")
     private String adminEmail;
 
-   
-private static final Logger log =
-        LoggerFactory.getLogger(EmailService.class);
+    private final JavaMailSender mailSender;
 
-private final JavaMailSender mailSender;
-
-public EmailService(JavaMailSender mailSender) {
-    this.mailSender = mailSender;
-}
-    
-    // ─────────────────────────────────────────────────────────────
-    // GET FRESH ACCESS TOKEN
-    // ─────────────────────────────────────────────────────────────
-
-    private String getAccessToken() throws Exception {
-        String body = "client_id=" + clientId +
-                      "&client_secret=" + clientSecret +
-                      "&refresh_token=" + refreshToken +
-                      "&grant_type=refresh_token";
-
-        HttpRequest request = HttpRequest.newBuilder()
-            .uri(URI.create(TOKEN_URL))
-            .timeout(Duration.ofSeconds(15))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .POST(HttpRequest.BodyPublishers.ofString(body))
-            .build();
-
-        HttpResponse<String> response =
-            httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-        if (response.statusCode() != 200)
-            throw new RuntimeException("Failed to get access token: " + response.body());
-
-        Map<?, ?> json = objectMapper.readValue(response.body(), Map.class);
-        return (String) json.get("access_token");
-    }
+    public EmailService(JavaMailSender mailSender) {
+        this.mailSender = mailSender;
+    } 
+  
 
     // ─────────────────────────────────────────────────────────────
     // CORE SEND WITH RETRY

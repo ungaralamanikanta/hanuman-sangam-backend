@@ -4,6 +4,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -23,28 +24,59 @@ public class JwtAuthFilter extends OncePerRequestFilter {
     }
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain filterChain)
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain filterChain)
             throws ServletException, IOException {
 
-        String authHeader = request.getHeader("Authorization");
+        String authHeader =
+                request.getHeader("Authorization");
 
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
-            if (jwtUtil.isTokenValid(token)) {
-                String phone = jwtUtil.extractPhone(token);
-                String role  = jwtUtil.extractRole(token);
+        if (authHeader != null &&
+                authHeader.startsWith("Bearer ")) {
 
-                // BUG FIX: role stored in JWT is "ADMIN" or "MEMBER".
-                // Spring Security requires "ROLE_ADMIN" / "ROLE_MEMBER" prefix.
-                // hasRole("ADMIN") in SecurityConfig checks for "ROLE_ADMIN" internally.
-                var auth = new UsernamePasswordAuthenticationToken(
-                        phone,
-                        null,
-                        List.of(new SimpleGrantedAuthority("ROLE_" + role))
-                );
-                SecurityContextHolder.getContext().setAuthentication(auth);
+            try {
+
+                String token =
+                        authHeader.substring(7);
+
+                if (jwtUtil.isTokenValid(token)
+                        &&
+                        SecurityContextHolder
+                                .getContext()
+                                .getAuthentication() == null) {
+
+                    String phone =
+                            jwtUtil.extractPhone(token);
+
+                    String role =
+                            jwtUtil.extractRole(token);
+
+                    if (role != null &&
+                            !role.isBlank()) {
+
+                        UsernamePasswordAuthenticationToken auth =
+                                new UsernamePasswordAuthenticationToken(
+                                        phone,
+                                        null,
+                                        List.of(
+                                                new SimpleGrantedAuthority(
+                                                        "ROLE_" + role
+                                                )
+                                        )
+                                );
+
+                        SecurityContextHolder
+                                .getContext()
+                                .setAuthentication(auth);
+                    }
+                }
+
+            } catch (Exception ex) {
+
+                SecurityContextHolder.clearContext();
+
             }
         }
 

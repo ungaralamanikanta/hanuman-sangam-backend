@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import jakarta.mail.internet.MimeMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.scheduling.annotation.Async;
 
 @Service
 public class EmailService {
@@ -30,58 +31,116 @@ public class EmailService {
         this.mailSender = mailSender;
     } 
   
+private void validateEmail(String email) {
 
+    if (email == null ||
+        !email.matches(
+            "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+$"
+        )) {
+
+        throw new RuntimeException(
+                "Invalid email address."
+        );
+    }
+}
     // ─────────────────────────────────────────────────────────────
     // CORE SEND WITH RETRY
     // ─────────────────────────────────────────────────────────────
 
-private void send(String to, String subject, String html, String replyTo) {
+private void send(String to, String subject, String html) {
+    send(to, subject, html, null);
+}
+
+private void send(
+        String to,
+        String subject,
+        String html,
+        String replyTo) {
+
+    validateEmail(to);
 
     int retries = 3;
 
     while (retries > 0) {
+
         try {
-            MimeMessage message = mailSender.createMimeMessage();
+
+            MimeMessage message =
+                    mailSender.createMimeMessage();
 
             MimeMessageHelper helper =
-                    new MimeMessageHelper(message, true, "UTF-8");
+                    new MimeMessageHelper(
+                            message,
+                            true,
+                            "UTF-8"
+                    );
 
             helper.setFrom(fromEmail, fromName);
             helper.setTo(to);
             helper.setSubject(subject);
-            helper.setText(wrapInTemplate(html), true);
+            helper.setText(
+                    wrapInTemplate(html),
+                    true
+            );
 
-            if (replyTo != null && !replyTo.isBlank()) {
+            if (replyTo != null &&
+                !replyTo.isBlank()) {
+
                 helper.setReplyTo(replyTo);
             }
 
             mailSender.send(message);
 
-            log.info("Email sent successfully to {}", to);
+            log.info(
+                    "Email sent successfully to {}",
+                    to
+            );
+
             return;
 
         } catch (Exception e) {
 
             retries--;
 
-            log.error("Email send failed. Retries left: {}", retries);
+            log.error(
+                    "Email send failed. Retries left: {}",
+                    retries,
+                    e
+            );
 
             if (retries == 0) {
+
                 throw new RuntimeException(
-                        "Failed to send email after retries",
+                        "Failed to send email.",
                         e
                 );
             }
 
             try {
-                Thread.sleep(3000);
+
+                Thread.sleep(1000);
+
             } catch (InterruptedException ex) {
+
                 Thread.currentThread().interrupt();
             }
         }
     }
 }
 
+
+    private String escapeHtml(String text) {
+
+    if (text == null) {
+        return "";
+    }
+
+    return text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;");
+}
     // ─────────────────────────────────────────────────────────────
     // HTML TEMPLATE
     // ─────────────────────────────────────────────────────────────

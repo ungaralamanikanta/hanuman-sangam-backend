@@ -82,8 +82,7 @@ private String adminPasswordHash;
             emailService.sendOtp(email, otp);
         } catch (Exception e) {
             throw new RuntimeException(
-                "OTP generated but email delivery failed. Please click 'Resend OTP'. Error: " + e.getMessage());
-        }
+"Unable to send OTP. Please try again.");
 
         otpCooldown.put(email, LocalDateTime.now());
         return "OTP sent to " + email;

@@ -169,13 +169,17 @@ public class AuthService {
 
     // ── Admin Login ───────────────────────────────────────────────
 
-    public LoginResponse adminLogin(String phoneNumber, String password) {
-        if (!adminPhone.equals(phoneNumber) || !adminPassword.equals(password))
-            throw new RuntimeException("Invalid admin credentials.");
+   public LoginResponse adminLogin(String phoneNumber, String password) {
 
-        String token = jwtUtil.generateToken(phoneNumber, "ADMIN");
-        return new LoginResponse(token, "ADMIN", 0L, "Admin");
+    if (!adminPhone.equals(phoneNumber)
+            || !passwordEncoder.matches(password, adminPasswordHash)) {
+
+        throw new RuntimeException("Invalid admin credentials.");
     }
+
+    String token = jwtUtil.generateToken(phoneNumber, "ADMIN");
+    return new LoginResponse(token, "ADMIN", 0L, "Admin");
+}
 
     // ─────────────────────────────────────────────────────────────
     // FORGOT PASSWORD — by Email

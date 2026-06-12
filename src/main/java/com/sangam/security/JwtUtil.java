@@ -1,67 +1,110 @@
 package com.sangam.security;
 
-import io.jsonwebtoken.*;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+
+import jakarta.annotation.PostConstruct;
+
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
 import java.util.Date;
 
 @Component
 public class JwtUtil {
 
-    private static final String SECRET        = "HanumanSangamSecretKeyForJWTTokenGenerationMustBe256Bits!";
-    private static final long   EXPIRATION_MS = 86_400_000L; // 24 hours
+    @Value("${JWT_SECRET}")
+    private String jwtSecret;
 
-    // FIX: Changed Key → SecretKey (required by JJWT 0.12.x API)
-    private final SecretKey key = Keys.hmacShaKeyFor(SECRET.getBytes());
+    private SecretKey key;
 
-    // ── Generate Token ────────────────────────────────────────────
-    public String generateToken(String phoneNumber, String role) {
+    private static final long EXPIRATION_MS =
+            7_200_000L; // 2 Hours
+
+    @PostConstruct
+    public void init() {
+
+        this.key = Keys.hmacShaKeyFor(
+                jwtSecret.getBytes(
+                        StandardCharsets.UTF_8
+                )
+        );
+    }
+
+    public String generateToken(
+            String phoneNumber,
+            String role) {
+
         return Jwts.builder()
-                // FIX: subject() replaces deprecated setSubject()
+
+                .issuer("Hanuman-Sangam")
+
                 .subject(phoneNumber)
-                // FIX: claim() stays the same
+
                 .claim("role", role)
-                // FIX: issuedAt() replaces deprecated setIssuedAt()
+
                 .issuedAt(new Date())
-                // FIX: expiration() replaces deprecated setExpiration()
-                .expiration(new Date(System.currentTimeMillis() + EXPIRATION_MS))
-                // FIX: signWith(key) — no need to pass SignatureAlgorithm,
-                //      JJWT 0.12.x detects it automatically from the key type
+
+                .expiration(
+                        new Date(
+                                System.currentTimeMillis()
+                                        + EXPIRATION_MS
+                        )
+                )
+
                 .signWith(key)
+
                 .compact();
     }
 
-    // ── Extract Phone Number ──────────────────────────────────────
-    public String extractPhone(String token) {
-        return getClaims(token).getSubject();
+    public String extractPhone(
+            String token) {
+
+        return getClaims(token)
+                .getSubject();
     }
 
-    // ── Extract Role ──────────────────────────────────────────────
-    public String extractRole(String token) {
-        return (String) getClaims(token).get("role");
+    public String extractRole(
+            String token) {
+
+        return (String)
+                getClaims(token)
+                        .get("role");
     }
 
-    // ── Validate Token ────────────────────────────────────────────
-    public boolean isTokenValid(String token) {
+    public boolean isTokenValid(
+            String token) {
+
         try {
-            getClaims(token);
-            return true;
-        } catch (JwtException | IllegalArgumentException e) {
+
+            Claims claims =
+                    getClaims(token);
+
+            return claims
+                    .getExpiration()
+                    .after(new Date());
+
+        } catch (Exception e) {
+
             return false;
         }
     }
 
-    // ── Parse Claims ──────────────────────────────────────────────
-    private Claims getClaims(String token) {
-        // FIX: parserBuilder() + setSigningKey() + parseClaimsJws() + getBody()
-        //      are all deprecated/removed in 0.12.x.
-        //      New API: parser() + verifyWith() + parseSignedClaims() + getPayload()
+    private Claims getClaims(
+            String token) {
+
         return Jwts.parser()
+
                 .verifyWith(key)
+
                 .build()
+
                 .parseSignedClaims(token)
+
                 .getPayload();
     }
 }

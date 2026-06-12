@@ -29,8 +29,8 @@ public class AuthService {
     @Value("${app.admin.phone}")
     private String adminPhone;
 
-    @Value("${app.admin.password}")
-    private String adminPassword;
+   @Value("${app.admin.password}")
+private String adminPasswordHash;
 
     private static final SecureRandom SECURE_RANDOM       = new SecureRandom();
     private static final int          OTP_COOLDOWN_SECONDS = 60;
@@ -137,7 +137,19 @@ public class AuthService {
         member.setName(request.getName());
         member.setEmail(email);
         member.setPhoneNumber(request.getPhoneNumber());
+        if(!request.getPhoneNumber()
+        .matches("^[6-9][0-9]{9}$")){
+
+    throw new RuntimeException(
+        "Invalid mobile number.");
+}
         member.setPassword(passwordEncoder.encode(request.getPassword()));
+        if(request.getPassword()==null ||
+   request.getPassword().length()<8){
+
+    throw new RuntimeException(
+        "Password must be at least 8 characters.");
+}
         member.setAddress(request.getAddress());
         member.setStatus(Member.Status.PENDING);
         member.setRole(Member.Role.MEMBER);
@@ -218,7 +230,7 @@ public class AuthService {
         try {
             emailService.sendForgotPasswordOtp(email, member.getName(), otp);
         } catch (Exception e) {
-            throw new RuntimeException("OTP generated but email delivery failed. Please try again.");
+            throw new RuntimeException("Unable to send OTP. Please try again.");
         }
 
         otpCooldown.put("fp_" + email, LocalDateTime.now());

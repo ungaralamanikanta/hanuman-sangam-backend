@@ -35,44 +35,50 @@ public class EmailService {
     // CORE SEND WITH RETRY
     // ─────────────────────────────────────────────────────────────
 
-   private void send(String to, String subject, String html) {
-    send(to, subject, html, null);
-}
+private void send(String to, String subject, String html, String replyTo) {
 
-private void send(String to,
-                  String subject,
-                  String html,
-                  String replyTo) {
+    int retries = 3;
 
-    try {
+    while (retries > 0) {
+        try {
+            MimeMessage message = mailSender.createMimeMessage();
 
-        MimeMessage message =
-                mailSender.createMimeMessage();
+            MimeMessageHelper helper =
+                    new MimeMessageHelper(message, true, "UTF-8");
 
-        MimeMessageHelper helper =
-                new MimeMessageHelper(message, true, "UTF-8");
+            helper.setFrom(fromEmail, fromName);
+            helper.setTo(to);
+            helper.setSubject(subject);
+            helper.setText(wrapInTemplate(html), true);
 
-        helper.setFrom(fromEmail, fromName);
-        helper.setTo(to);
-        helper.setSubject(subject);
-        helper.setText(wrapInTemplate(html), true);
+            if (replyTo != null && !replyTo.isBlank()) {
+                helper.setReplyTo(replyTo);
+            }
 
-        if (replyTo != null && !replyTo.isBlank()) {
-            helper.setReplyTo(replyTo);
+            mailSender.send(message);
+
+            log.info("Email sent successfully to {}", to);
+            return;
+
+        } catch (Exception e) {
+
+            retries--;
+
+            log.error("Email send failed. Retries left: {}", retries);
+
+            if (retries == 0) {
+                throw new RuntimeException(
+                        "Failed to send email after retries",
+                        e
+                );
+            }
+
+            try {
+                Thread.sleep(3000);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
         }
-
-        mailSender.send(message);
-
-        log.info("Email sent successfully to {}", to);
-
-    } catch (Exception e) {
-
-        log.error("Email send failed", e);
-
-        throw new RuntimeException(
-                "Failed to send email: " + e.getMessage(),
-                e
-        );
     }
 }
 

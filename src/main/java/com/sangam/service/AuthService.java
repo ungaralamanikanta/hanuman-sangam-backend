@@ -133,29 +133,53 @@ private String adminPasswordHash;
         if (memberRepository.existsByPhoneNumber(request.getPhoneNumber()))
             throw new RuntimeException("Phone number is already registered.");
 
-        Member member = new Member();
-        member.setName(request.getName());
-        member.setEmail(email);
-        member.setPhoneNumber(request.getPhoneNumber());
-        if(!request.getPhoneNumber()
-        .matches("^[6-9][0-9]{9}$")){
+      Member member = new Member();
+
+if (request.getName() == null
+        || request.getName().trim().length() < 3) {
 
     throw new RuntimeException(
-        "Invalid mobile number.");
+            "Name must contain at least 3 characters.");
 }
-        member.setPassword(passwordEncoder.encode(request.getPassword()));
-        if(request.getPassword()==null ||
-   request.getPassword().length()<8){
+
+member.setName(request.getName().trim());
+
+member.setEmail(email);
+
+if (request.getPhoneNumber() == null
+        || !request.getPhoneNumber()
+        .matches("^[6-9][0-9]{9}$")) {
 
     throw new RuntimeException(
-        "Password must be at least 8 characters.");
+            "Invalid mobile number.");
 }
-        member.setAddress(request.getAddress());
-        member.setStatus(Member.Status.PENDING);
-        member.setRole(Member.Role.MEMBER);
-        member.setEmailVerified(true);
-        memberRepository.save(member);
 
+member.setPhoneNumber(
+        request.getPhoneNumber());
+
+if (request.getPassword() == null
+        || request.getPassword().length() < 8) {
+
+    throw new RuntimeException(
+            "Password must be at least 8 characters.");
+}
+
+member.setPassword(
+        passwordEncoder.encode(
+                request.getPassword()));
+
+member.setAddress(
+        request.getAddress());
+
+member.setStatus(
+        Member.Status.PENDING);
+
+member.setRole(
+        Member.Role.MEMBER);
+
+member.setEmailVerified(true);
+
+memberRepository.save(member);
         otpStoreRepository.deleteByEmail(email);
         return "Registration successful! Please wait for admin approval.";
     }
@@ -276,6 +300,13 @@ private String adminPasswordHash;
         if (!store.isVerified())
             throw new RuntimeException("OTP not verified. Please verify OTP first.");
 
+        if (newPassword == null
+        || newPassword.length() < 8) {
+
+    throw new RuntimeException(
+            "Password must be at least 8 characters.");
+}
+        
         member.setPassword(passwordEncoder.encode(newPassword));
         memberRepository.save(member);
 

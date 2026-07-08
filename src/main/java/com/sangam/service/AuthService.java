@@ -78,15 +78,15 @@ private String adminPasswordHash;
         store.setVerified(false);
         otpStoreRepository.save(store);
 
-        try {
-            emailService.sendOtp(email, otp);
-        } catch (Exception e) {
-            throw new RuntimeException(
-"Unable to send OTP. Please try again.");
+       try {
+    emailService.sendOtp(email, otp);
+} catch (Exception e) {
+    throw new RuntimeException(
+            "Unable to send OTP. Please try again.");
+}
 
-        otpCooldown.put(email, LocalDateTime.now());
-        return "OTP sent to " + email;
-    }
+otpCooldown.put(email, LocalDateTime.now());
+return "OTP sent to " + email;
 
     // ── STEP 2: Verify OTP ────────────────────────────────────────
 

@@ -1,20 +1,52 @@
 package com.sangam.service;
 
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import jakarta.mail.internet.MimeMessage;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.web.client.RestTemplate;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * EmailService — Resend API version (Render-compatible)
+ *
+ * WHY RESEND?
+ *  • Render blocks outbound SMTP ports 465 & 587
+ *  • Resend sends over HTTPS — no port issues
+ *  • Free tier: 3,000 emails/month, 100/day
+ *
+ * SETUP:
+ *  1. Create free account at https://resend.com
+ *  2. Get API key from Dashboard → API Keys
+ *  3. Add to Render Environment Variables:
+ *       RESEND_API_KEY = re_xxxxxxxxxxxx
+ *       APP_MAIL_FROM  = noreply@yourdomain.com   (or onboarding@resend.dev for testing)
+ *       APP_MAIL_FROM_NAME = Hanuman Sangam
+ *       APP_ADMIN_EMAIL = hanumansangamu@gmail.com
+ *
+ *  4. application.properties:
+ *       resend.api.key=${RESEND_API_KEY}
+ *       app.mail.from=${APP_MAIL_FROM}
+ *       app.mail.from-name=${APP_MAIL_FROM_NAME}
+ *       app.admin.email=${APP_ADMIN_EMAIL}
+ *
+ * NOTE: Remove spring-boot-starter-mail from pom.xml (no longer needed)
+ */
 @Service
 public class EmailService {
 
-    private static final Logger log =
-            LoggerFactory.getLogger(EmailService.class);
+    private static final Logger log = LoggerFactory.getLogger(EmailService.class);
+    private static final String RESEND_URL = "https://api.resend.com/emails";
+    private static final int MAX_RETRIES = 3;
+    private static final long RETRY_DELAY_MS = 1500;
+
+    @Value("${resend.api.key}")
+    private String resendApiKey;
 
     @Value("${app.mail.from}")
     private String fromEmail;
@@ -25,124 +57,91 @@ public class EmailService {
     @Value("${app.admin.email}")
     private String adminEmail;
 
-    private final JavaMailSender mailSender;
+    private final RestTemplate restTemplate = new RestTemplate();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public EmailService(JavaMailSender mailSender) {
-        this.mailSender = mailSender;
-    } 
-  
-private void validateEmail(String email) {
+    // ─────────────────────────────────────────────────────────────
+    // VALIDATION
+    // ─────────────────────────────────────────────────────────────
 
-    if (email == null ||
-        !email.matches(
-            "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+$"
-        )) {
-
-        throw new RuntimeException(
-                "Invalid email address."
-        );
+    private void validateEmail(String email) {
+        if (email == null || !email.matches("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+$")) {
+            throw new IllegalArgumentException("Invalid email address: " + email);
+        }
     }
-}
+
+    private boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
     // ─────────────────────────────────────────────────────────────
-    // CORE SEND WITH RETRY
+    // CORE SEND WITH RETRY (Resend API)
     // ─────────────────────────────────────────────────────────────
 
-private void send(String to, String subject, String html) {
-    send(to, subject, html, null);
-}
+    private void send(String to, String subject, String html) {
+        send(to, subject, html, null);
+    }
 
-private void send(
-        String to,
-        String subject,
-        String html,
-        String replyTo) {
+    private void send(String to, String subject, String html, String replyTo) {
+        validateEmail(to);
 
-    validateEmail(to);
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", "Bearer " + resendApiKey);
+        headers.setContentType(MediaType.APPLICATION_JSON);
 
-    int retries = 3;
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("from", fromName + " <" + fromEmail + ">");
+        payload.put("to", List.of(to));
+        payload.put("subject", subject);
+        payload.put("html", wrapInTemplate(html));
 
-    while (retries > 0) {
+        if (!isBlank(replyTo)) {
+            payload.put("reply_to", replyTo);
+        }
 
+        String jsonBody;
         try {
-
-            MimeMessage message =
-                    mailSender.createMimeMessage();
-
-            MimeMessageHelper helper =
-                    new MimeMessageHelper(
-                            message,
-                            true,
-                            "UTF-8"
-                    );
-
-            helper.setFrom(fromEmail, fromName);
-            helper.setTo(to);
-            helper.setSubject(subject);
-            helper.setText(
-                    wrapInTemplate(html),
-                    true
-            );
-
-            if (replyTo != null &&
-                !replyTo.isBlank()) {
-
-                helper.setReplyTo(replyTo);
-            }
-
-            mailSender.send(message);
-
-            log.info(
-                    "Email sent successfully to {}",
-                    to
-            );
-
-            return;
-
+            jsonBody = objectMapper.writeValueAsString(payload);
         } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize email payload", e);
+        }
 
-            retries--;
+        HttpEntity<String> request = new HttpEntity<>(jsonBody, headers);
 
-            log.error(
-                    "Email send failed. Retries left: {}",
-                    retries,
-                    e
-            );
-
-            if (retries == 0) {
-
-                throw new RuntimeException(
-                        "Failed to send email.",
-                        e
-                );
-            }
-
+        int retries = MAX_RETRIES;
+        while (retries > 0) {
             try {
+                ResponseEntity<String> response =
+                        restTemplate.postForEntity(RESEND_URL, request, String.class);
 
-                Thread.sleep(1000);
+                if (response.getStatusCode().is2xxSuccessful()) {
+                    log.info("✅ Email sent to {} | Subject: {}", to, subject);
+                    return;
+                } else {
+                    log.warn("⚠️ Resend returned non-2xx: {} | Body: {}",
+                            response.getStatusCode(), response.getBody());
+                }
 
-            } catch (InterruptedException ex) {
+            } catch (Exception e) {
+                retries--;
+                log.error("❌ Email send failed. Retries left: {} | Error: {}", retries, e.getMessage());
 
-                Thread.currentThread().interrupt();
+                if (retries == 0) {
+                    throw new RuntimeException("Failed to send email after " + MAX_RETRIES + " attempts.", e);
+                }
+
+                try {
+                    Thread.sleep(RETRY_DELAY_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Email retry interrupted", ie);
+                }
             }
         }
     }
-}
 
-
-    private String escapeHtml(String text) {
-
-    if (text == null) {
-        return "";
-    }
-
-    return text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;");
-}
     // ─────────────────────────────────────────────────────────────
-    // HTML TEMPLATE
+    // HTML TEMPLATE WRAPPER
     // ─────────────────────────────────────────────────────────────
 
     private String wrapInTemplate(String bodyContent) {
@@ -157,6 +156,7 @@ private void send(
             "<table width='600' cellpadding='0' cellspacing='0'" +
             " style='max-width:600px;width:100%;border-radius:16px;" +
             " box-shadow:0 4px 24px rgba(0,0,0,0.09);overflow:hidden;'>" +
+            // Header
             "<tr><td style='background:linear-gradient(135deg,#bf360c,#e65c00,#f9a825);" +
             " padding:34px 40px;text-align:center;'>" +
             "<div style='font-size:50px;margin-bottom:10px;'>&#x1F64F;</div>" +
@@ -166,13 +166,16 @@ private void send(
             " letter-spacing:3px;text-transform:uppercase;" +
             " font-family:Arial,sans-serif;'>&#2404; Jay Shri Ram &#2404;</p>" +
             "</td></tr>" +
+            // Body
             "<tr><td style='background:#ffffff;padding:38px 40px;'>" +
             bodyContent +
             "</td></tr>" +
+            // Divider
             "<tr><td style='background:#fff8f0;padding:16px;text-align:center;" +
             " border-top:1px solid #f0e0cc;border-bottom:1px solid #f0e0cc;'>" +
             "<span style='color:#e65c00;font-size:18px;letter-spacing:8px;'>~ ~ ~</span>" +
             "</td></tr>" +
+            // Footer
             "<tr><td style='background:#1a0a00;padding:26px 40px;text-align:center;'>" +
             "<p style='margin:0 0 5px;color:#f9a825;font-size:12px;font-weight:700;" +
             " letter-spacing:2px;font-family:Arial,sans-serif;'>HANUMAN SANGAM</p>" +
@@ -187,7 +190,7 @@ private void send(
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 1. OTP (Registration)
+    // 1. OTP — REGISTRATION
     // ─────────────────────────────────────────────────────────────
 
     public void sendOtp(String toEmail, String otp) {
@@ -211,11 +214,11 @@ private void send(
             "If you did not request this OTP, please ignore this email safely.</p>" +
             footer();
 
-        send(toEmail, "Hanuman Sangam — Email Verification Code", html);
+        send(toEmail, "Hanuman Sangam \u2014 Email Verification Code", html);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 2. FORGOT PASSWORD OTP  ← NEW METHOD (fixes build error)
+    // 2. OTP — FORGOT PASSWORD
     // ─────────────────────────────────────────────────────────────
 
     public void sendForgotPasswordOtp(String toEmail, String memberName, String otp) {
@@ -228,7 +231,7 @@ private void send(
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "One-Time Password for Password Reset</p>" +
             "<p style='margin:0 0 14px;color:#333;font-size:15px;line-height:1.8;'>" +
-            "Dear <strong>" + memberName + "</strong>,</p>" +
+            "Dear <strong>" + escapeHtml(memberName) + "</strong>,</p>" +
             "<p style='margin:0 0 26px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "We received a request to reset your " +
@@ -239,7 +242,7 @@ private void send(
                 "Your password will <strong>not</strong> be changed.") +
             footer();
 
-        send(toEmail, "Hanuman Sangam — Password Reset OTP", html);
+        send(toEmail, "Hanuman Sangam \u2014 Password Reset OTP", html);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -247,7 +250,7 @@ private void send(
     // ─────────────────────────────────────────────────────────────
 
     public void sendApprovalNotification(String toEmail, String memberName) {
-        log.info("Sending approval to {}", toEmail);
+        log.info("Sending approval notification to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#2e7d32;font-size:21px;" +
             " font-family:Georgia,serif;'>Membership Approved! &#x2705;</h2>" +
@@ -256,7 +259,7 @@ private void send(
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Welcome to the Hanuman Sangam Family</p>" +
             "<p style='margin:0 0 14px;color:#333;font-size:15px;line-height:1.8;'>" +
-            "Dear <strong>" + memberName + "</strong>,</p>" +
+            "Dear <strong>" + escapeHtml(memberName) + "</strong>,</p>" +
             "<p style='margin:0 0 24px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "Your membership for <strong style='color:#e65c00;'>Hanuman Sangam</strong> has been " +
@@ -271,7 +274,7 @@ private void send(
             "Your account is now active and ready to use.</p></div>" +
             footer();
 
-        send(toEmail, "Membership Approved — Welcome to Hanuman Sangam!", html);
+        send(toEmail, "Membership Approved \u2014 Welcome to Hanuman Sangam!", html);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -279,7 +282,7 @@ private void send(
     // ─────────────────────────────────────────────────────────────
 
     public void sendRejectionNotification(String toEmail, String memberName) {
-        log.info("Sending rejection to {}", toEmail);
+        log.info("Sending rejection notification to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#c62828;font-size:21px;" +
             " font-family:Georgia,serif;'>Membership Status Update</h2>" +
@@ -288,7 +291,7 @@ private void send(
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Regarding your Hanuman Sangam registration</p>" +
             "<p style='margin:0 0 14px;color:#333;font-size:15px;line-height:1.8;'>" +
-            "Dear <strong>" + memberName + "</strong>,</p>" +
+            "Dear <strong>" + escapeHtml(memberName) + "</strong>,</p>" +
             "<p style='margin:0 0 24px;color:#555;font-size:15px;" +
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "After careful review, your membership request has " +
@@ -298,7 +301,7 @@ private void send(
             "hanumansangamu@gmail.com</a> for clarification.</p>" +
             footer();
 
-        send(toEmail, "Membership Status Update — Hanuman Sangam", html);
+        send(toEmail, "Membership Status Update \u2014 Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -310,21 +313,21 @@ private void send(
         log.info("Sending announcement '{}' to {}", title, toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
-            " font-family:Georgia,serif;'>&#x1F4E2; " + title + "</h2>" +
+            " font-family:Georgia,serif;'>&#x1F4E2; " + escapeHtml(title) + "</h2>" +
             "<p style='margin:0 0 26px;color:#bbb;font-size:11px;" +
             " text-transform:uppercase;font-family:Arial,sans-serif;" +
             " padding-bottom:18px;border-bottom:2px solid #f0e0cc;'>" +
             "Important update from Hanuman Sangam</p>" +
             "<p style='margin:0 0 24px;color:#333;font-size:15px;line-height:1.8;'>" +
-            "Dear <strong>" + memberName + "</strong>,</p>" +
+            "Dear <strong>" + escapeHtml(memberName) + "</strong>,</p>" +
             "<div style='background:linear-gradient(135deg,#fff8f0,#fff3e0);" +
             " border:1px solid #ffccbc;border-radius:14px;padding:28px;margin:0 0 26px;'>" +
             "<div style='color:#333;font-size:15px;line-height:1.9;" +
             " font-family:Arial,sans-serif;white-space:pre-line;'>" +
-            announcementBody + "</div></div>" +
+            escapeHtml(announcementBody) + "</div></div>" +
             footer();
 
-        send(toEmail, title + " — Hanuman Sangam", html);
+        send(toEmail, escapeHtml(title) + " \u2014 Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -333,7 +336,8 @@ private void send(
 
     public void sendContactMessageToAdmin(String memberName, String memberEmail,
                                           String memberPhone, String message) {
-        log.info("Sending contact from {} to admin", memberName);
+        log.info("Sending contact message from {} to admin", memberName);
+
         String safeEmail = isBlank(memberEmail) ? "Not provided" : memberEmail;
         String safePhone = isBlank(memberPhone) ? "Not provided" : memberPhone;
         String replyTo   = isBlank(memberEmail) ? adminEmail : memberEmail;
@@ -348,17 +352,18 @@ private void send(
             "<div style='background:#fafafa;border:1px solid #f0e0cc;" +
             " border-radius:12px;padding:20px;margin:0 0 22px;'>" +
             "<table cellpadding='0' cellspacing='8' width='100%'>" +
-            infoRow("Name",  memberName) +
-            infoRow("Email", safeEmail) +
-            infoRow("Phone", safePhone) +
+            infoRow("Name",  escapeHtml(memberName)) +
+            infoRow("Email", escapeHtml(safeEmail)) +
+            infoRow("Phone", escapeHtml(safePhone)) +
             "</table></div>" +
             "<div style='background:#fff8f0;border-left:5px solid #e65c00;" +
             " border-radius:0 12px 12px 0;padding:20px;margin:0 0 22px;'>" +
             "<p style='margin:0;color:#333;font-size:15px;" +
             " line-height:1.9;font-family:Arial,sans-serif;white-space:pre-line;'>" +
-            message + "</p></div>";
+            escapeHtml(message) + "</p></div>" +
+            footer();
 
-        send(adminEmail, "Contact from " + memberName + " — Hanuman Sangam", html, replyTo);
+        send(adminEmail, "Contact from " + escapeHtml(memberName) + " \u2014 Hanuman Sangam", html, replyTo);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -374,9 +379,9 @@ private void send(
             " font-family:Arial,sans-serif;'>Your One-Time Password</p>" +
             "<div style='font-size:44px;font-weight:700;color:#e65c00;" +
             " letter-spacing:14px;font-family:\"Courier New\",monospace;margin:6px 0;'>" +
-            otp + "</div>" +
+            escapeHtml(otp) + "</div>" +
             "<p style='margin:10px 0 0;color:#999;font-size:12px;font-family:Arial,sans-serif;'>" +
-            "Valid for <strong>5 minutes</strong> only — do not share</p>" +
+            "Valid for <strong>5 minutes</strong> only \u2014 do not share</p>" +
             "</div>";
     }
 
@@ -405,7 +410,12 @@ private void send(
                "</tr>";
     }
 
-    private boolean isBlank(String s) {
-        return s == null || s.isBlank();
+    private String escapeHtml(String text) {
+        if (text == null) return "";
+        return text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;");
     }
 }

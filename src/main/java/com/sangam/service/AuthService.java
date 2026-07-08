@@ -87,7 +87,7 @@ private String adminPasswordHash;
 
 otpCooldown.put(email, LocalDateTime.now());
 return "OTP sent to " + email;
-
+    }
     // ── STEP 2: Verify OTP ────────────────────────────────────────
 
     @Transactional

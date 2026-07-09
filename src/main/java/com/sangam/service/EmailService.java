@@ -16,18 +16,17 @@ import java.util.Map;
 
 /**
  * EmailService — Hanuman Sangam
- *
- * SMTP → Resend HTTP API (Render free tier compatible).
- * Port block problem ledu — pure HTTPS call.
+ * Uses Brevo (formerly Sendinblue) HTTP API.
+ * No domain verification needed — works with Gmail sender on free tier.
  *
  * ── application.properties ──────────────────────────────────────
- *   resend.api.key=${RESEND_API_KEY}
- *   app.mail.from=onboarding@resend.dev
+ *   brevo.api.key=${BREVO_API_KEY}
+ *   app.mail.from=hanumansangamu@gmail.com
  *   app.mail.from-name=Hanuman Sangam
  *   app.admin.email=hanumansangamu@gmail.com
  *
  * ── Render Dashboard → Environment ──────────────────────────────
- *   RESEND_API_KEY = re_xxxxxxxxxxxxxxxx
+ *   BREVO_API_KEY = xkeysib-xxxxxxxxxxxxxxxx
  * ────────────────────────────────────────────────────────────────
  */
 @Service
@@ -35,12 +34,12 @@ public class EmailService {
 
     private static final Logger log = LoggerFactory.getLogger(EmailService.class);
 
-    private static final String RESEND_URL    = "https://api.resend.com/emails";
-    private static final int    MAX_RETRIES   = 3;
-    private static final long   RETRY_DELAY   = 1500L;
+    private static final String BREVO_URL   = "https://api.brevo.com/v3/smtp/email";
+    private static final int    MAX_RETRIES = 3;
+    private static final long   RETRY_DELAY = 1500L;
 
-    @Value("${resend.api.key}")
-    private String resendApiKey;
+    @Value("${brevo.api.key}")
+    private String brevoApiKey;
 
     @Value("${app.mail.from}")
     private String fromEmail;
@@ -65,7 +64,7 @@ public class EmailService {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // CORE SEND — Resend HTTP API with retry
+    // CORE SEND — Brevo HTTP API with retry
     // ─────────────────────────────────────────────────────────────
 
     private void send(String to, String subject, String html) {
@@ -76,18 +75,20 @@ public class EmailService {
         validateEmail(to);
 
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(resendApiKey);
+        headers.set("api-key", brevoApiKey);          // Brevo uses api-key header
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setAccept(List.of(MediaType.APPLICATION_JSON));
 
         String jsonBody;
         try {
             Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("from",    fromName + " <" + fromEmail + ">");
-            payload.put("to",      List.of(to));
-            payload.put("subject", subject);
-            payload.put("html",    wrapInTemplate(html));
-            if (!isBlank(replyTo)) payload.put("reply_to", replyTo);
+            payload.put("sender",      Map.of("name", fromName, "email", fromEmail));
+            payload.put("to",          List.of(Map.of("email", to)));
+            payload.put("subject",     subject);
+            payload.put("htmlContent", wrapInTemplate(html));
+            if (!isBlank(replyTo)) {
+                payload.put("replyTo", Map.of("email", replyTo));
+            }
             jsonBody = objectMapper.writeValueAsString(payload);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize email payload", e);
@@ -98,25 +99,24 @@ public class EmailService {
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 ResponseEntity<String> response =
-                        restTemplate.postForEntity(RESEND_URL, request, String.class);
+                        restTemplate.postForEntity(BREVO_URL, request, String.class);
 
                 if (response.getStatusCode().is2xxSuccessful()) {
-                    log.info("✅ Email sent | to={} | subject='{}' | attempt={}",
+                    log.info("✅ Email sent via Brevo | to={} | subject='{}' | attempt={}",
                             to, subject, attempt);
                     return;
                 }
 
             } catch (HttpClientErrorException e) {
-                // 4xx — bad API key, bad email, etc. — retry useless
-                log.error("❌ Resend 4xx error ({}): {} — to={}",
+                // 4xx — bad API key, bad sender, etc. — retry useless
+                log.error("❌ Brevo 4xx error ({}): {} — to={}",
                         e.getStatusCode(), e.getResponseBodyAsString(), to);
                 throw new RuntimeException(
-                        "Email send failed (check API key / from address): "
-                        + e.getResponseBodyAsString(), e);
+                        "Email send failed: " + e.getResponseBodyAsString(), e);
 
             } catch (HttpServerErrorException e) {
-                // 5xx — Resend server issue — retry cheyyi
-                log.warn("⚠️  Resend 5xx ({}) attempt {}/{} for {}",
+                // 5xx — Brevo server issue — retry
+                log.warn("⚠️  Brevo 5xx ({}) attempt {}/{} for {}",
                         e.getStatusCode(), attempt, MAX_RETRIES, to);
 
             } catch (Exception e) {
@@ -152,7 +152,6 @@ public class EmailService {
             "<table width='600' cellpadding='0' cellspacing='0'" +
             " style='max-width:600px;width:100%;border-radius:16px;" +
             " box-shadow:0 4px 24px rgba(0,0,0,0.09);overflow:hidden;'>" +
-            // ── Header
             "<tr><td style='background:linear-gradient(135deg,#bf360c,#e65c00,#f9a825);" +
             " padding:34px 40px;text-align:center;'>" +
             "<div style='font-size:50px;margin-bottom:10px;'>&#x1F64F;</div>" +
@@ -162,15 +161,12 @@ public class EmailService {
             " letter-spacing:3px;text-transform:uppercase;" +
             " font-family:Arial,sans-serif;'>&#2404; Jay Shri Ram &#2404;</p>" +
             "</td></tr>" +
-            // ── Body
             "<tr><td style='background:#ffffff;padding:38px 40px;'>" +
             bodyContent + "</td></tr>" +
-            // ── Divider
             "<tr><td style='background:#fff8f0;padding:16px;text-align:center;" +
             " border-top:1px solid #f0e0cc;border-bottom:1px solid #f0e0cc;'>" +
             "<span style='color:#e65c00;font-size:18px;letter-spacing:8px;'>~ ~ ~</span>" +
             "</td></tr>" +
-            // ── Footer
             "<tr><td style='background:#1a0a00;padding:26px 40px;text-align:center;'>" +
             "<p style='margin:0 0 5px;color:#f9a825;font-size:12px;font-weight:700;" +
             " letter-spacing:2px;font-family:Arial,sans-serif;'>HANUMAN SANGAM</p>" +
@@ -208,7 +204,6 @@ public class EmailService {
             " font-family:Arial,sans-serif;line-height:1.7;'>" +
             "If you did not request this OTP, please ignore this email safely.</p>" +
             footer();
-
         send(toEmail, "Hanuman Sangam — Email Verification Code", html);
     }
 
@@ -236,7 +231,6 @@ public class EmailService {
             securityNotice("If you did not request a password reset, please ignore this email. " +
                 "Your password will <strong>not</strong> be changed.") +
             footer();
-
         send(toEmail, "Hanuman Sangam — Password Reset OTP", html);
     }
 
@@ -268,7 +262,6 @@ public class EmailService {
             "<p style='margin:0;color:#388e3c;font-size:14px;font-family:Arial,sans-serif;'>" +
             "Your account is now active and ready to use.</p></div>" +
             footer();
-
         send(toEmail, "Membership Approved — Welcome to Hanuman Sangam!", html);
     }
 
@@ -295,7 +288,6 @@ public class EmailService {
             "<a href='mailto:hanumansangamu@gmail.com' style='color:#e65c00;'>" +
             "hanumansangamu@gmail.com</a> for clarification.</p>" +
             footer();
-
         send(toEmail, "Membership Status Update — Hanuman Sangam", html);
     }
 
@@ -321,7 +313,6 @@ public class EmailService {
             " font-family:Arial,sans-serif;white-space:pre-line;'>" +
             escapeHtml(announcementBody) + "</div></div>" +
             footer();
-
         send(toEmail, escapeHtml(title) + " — Hanuman Sangam", html);
     }
 
@@ -334,7 +325,7 @@ public class EmailService {
         log.info("Sending contact message from {} to admin", memberName);
         String safeEmail = isBlank(memberEmail) ? "Not provided" : memberEmail;
         String safePhone = isBlank(memberPhone) ? "Not provided" : memberPhone;
-        String replyTo   = isBlank(memberEmail) ? adminEmail   : memberEmail;
+        String replyTo   = isBlank(memberEmail) ? adminEmail : memberEmail;
 
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +

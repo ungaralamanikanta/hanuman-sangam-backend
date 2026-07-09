@@ -1,49 +1,43 @@
 package com.sangam.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestTemplate;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * EmailService — Resend API version (Render-compatible)
+ * EmailService — Hanuman Sangam
  *
- * WHY RESEND?
- *  • Render blocks outbound SMTP ports 465 & 587
- *  • Resend sends over HTTPS — no port issues
- *  • Free tier: 3,000 emails/month, 100/day
+ * SMTP → Resend HTTP API (Render free tier compatible).
+ * Port block problem ledu — pure HTTPS call.
  *
- * SETUP:
- *  1. Create free account at https://resend.com
- *  2. Get API key from Dashboard → API Keys
- *  3. Add to Render Environment Variables:
- *       RESEND_API_KEY = re_xxxxxxxxxxxx
- *       APP_MAIL_FROM  = noreply@yourdomain.com   (or onboarding@resend.dev for testing)
- *       APP_MAIL_FROM_NAME = Hanuman Sangam
- *       APP_ADMIN_EMAIL = hanumansangamu@gmail.com
+ * ── application.properties ──────────────────────────────────────
+ *   resend.api.key=${RESEND_API_KEY}
+ *   app.mail.from=onboarding@resend.dev
+ *   app.mail.from-name=Hanuman Sangam
+ *   app.admin.email=hanumansangamu@gmail.com
  *
- *  4. application.properties:
- *       resend.api.key=${RESEND_API_KEY}
- *       app.mail.from=${APP_MAIL_FROM}
- *       app.mail.from-name=${APP_MAIL_FROM_NAME}
- *       app.admin.email=${APP_ADMIN_EMAIL}
- *
- * NOTE: Remove spring-boot-starter-mail from pom.xml (no longer needed)
+ * ── Render Dashboard → Environment ──────────────────────────────
+ *   RESEND_API_KEY = re_xxxxxxxxxxxxxxxx
+ * ────────────────────────────────────────────────────────────────
  */
 @Service
 public class EmailService {
 
     private static final Logger log = LoggerFactory.getLogger(EmailService.class);
-    private static final String RESEND_URL = "https://api.resend.com/emails";
-    private static final int MAX_RETRIES = 3;
-    private static final long RETRY_DELAY_MS = 1500;
+
+    private static final String RESEND_URL    = "https://api.resend.com/emails";
+    private static final int    MAX_RETRIES   = 3;
+    private static final long   RETRY_DELAY   = 1500L;
 
     @Value("${resend.api.key}")
     private String resendApiKey;
@@ -58,7 +52,7 @@ public class EmailService {
     private String adminEmail;
 
     private final RestTemplate restTemplate = new RestTemplate();
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper  = new ObjectMapper();
 
     // ─────────────────────────────────────────────────────────────
     // VALIDATION
@@ -70,12 +64,8 @@ public class EmailService {
         }
     }
 
-    private boolean isBlank(String s) {
-        return s == null || s.isBlank();
-    }
-
     // ─────────────────────────────────────────────────────────────
-    // CORE SEND WITH RETRY (Resend API)
+    // CORE SEND — Resend HTTP API with retry
     // ─────────────────────────────────────────────────────────────
 
     private void send(String to, String subject, String html) {
@@ -86,21 +76,18 @@ public class EmailService {
         validateEmail(to);
 
         HttpHeaders headers = new HttpHeaders();
-        headers.set("Authorization", "Bearer " + resendApiKey);
+        headers.setBearerAuth(resendApiKey);
         headers.setContentType(MediaType.APPLICATION_JSON);
-
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("from", fromName + " <" + fromEmail + ">");
-        payload.put("to", List.of(to));
-        payload.put("subject", subject);
-        payload.put("html", wrapInTemplate(html));
-
-        if (!isBlank(replyTo)) {
-            payload.put("reply_to", replyTo);
-        }
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
 
         String jsonBody;
         try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("from",    fromName + " <" + fromEmail + ">");
+            payload.put("to",      List.of(to));
+            payload.put("subject", subject);
+            payload.put("html",    wrapInTemplate(html));
+            if (!isBlank(replyTo)) payload.put("reply_to", replyTo);
             jsonBody = objectMapper.writeValueAsString(payload);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize email payload", e);
@@ -108,47 +95,56 @@ public class EmailService {
 
         HttpEntity<String> request = new HttpEntity<>(jsonBody, headers);
 
-        int retries = MAX_RETRIES;
-        while (retries > 0) {
+        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
                 ResponseEntity<String> response =
                         restTemplate.postForEntity(RESEND_URL, request, String.class);
 
                 if (response.getStatusCode().is2xxSuccessful()) {
-                    log.info("✅ Email sent to {} | Subject: {}", to, subject);
+                    log.info("✅ Email sent | to={} | subject='{}' | attempt={}",
+                            to, subject, attempt);
                     return;
-                } else {
-                    log.warn("⚠️ Resend returned non-2xx: {} | Body: {}",
-                            response.getStatusCode(), response.getBody());
                 }
+
+            } catch (HttpClientErrorException e) {
+                // 4xx — bad API key, bad email, etc. — retry useless
+                log.error("❌ Resend 4xx error ({}): {} — to={}",
+                        e.getStatusCode(), e.getResponseBodyAsString(), to);
+                throw new RuntimeException(
+                        "Email send failed (check API key / from address): "
+                        + e.getResponseBodyAsString(), e);
+
+            } catch (HttpServerErrorException e) {
+                // 5xx — Resend server issue — retry cheyyi
+                log.warn("⚠️  Resend 5xx ({}) attempt {}/{} for {}",
+                        e.getStatusCode(), attempt, MAX_RETRIES, to);
 
             } catch (Exception e) {
-                retries--;
-                log.error("❌ Email send failed. Retries left: {} | Error: {}", retries, e.getMessage());
+                log.warn("⚠️  Network error attempt {}/{} for {}: {}",
+                        attempt, MAX_RETRIES, to, e.getMessage());
+            }
 
-                if (retries == 0) {
-                    throw new RuntimeException("Failed to send email after " + MAX_RETRIES + " attempts.", e);
-                }
-
-                try {
-                    Thread.sleep(RETRY_DELAY_MS);
-                } catch (InterruptedException ie) {
+            if (attempt < MAX_RETRIES) {
+                try { Thread.sleep(RETRY_DELAY); }
+                catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new RuntimeException("Email retry interrupted", ie);
+                    throw new RuntimeException("Email send interrupted", ie);
                 }
             }
         }
+
+        throw new RuntimeException(
+                "Failed to send email to " + to + " after " + MAX_RETRIES + " attempts.");
     }
 
     // ─────────────────────────────────────────────────────────────
-    // HTML TEMPLATE WRAPPER
+    // HTML WRAPPER TEMPLATE
     // ─────────────────────────────────────────────────────────────
 
     private String wrapInTemplate(String bodyContent) {
         return "<!DOCTYPE html><html lang='en'>" +
             "<head><meta charset='UTF-8'/>" +
-            "<meta name='viewport' content='width=device-width,initial-scale=1'/>" +
-            "</head>" +
+            "<meta name='viewport' content='width=device-width,initial-scale=1'/></head>" +
             "<body style='margin:0;padding:0;background:#fdf6ee;font-family:Georgia,serif;'>" +
             "<table width='100%' cellpadding='0' cellspacing='0'" +
             " style='background:#fdf6ee;padding:36px 16px;'>" +
@@ -156,7 +152,7 @@ public class EmailService {
             "<table width='600' cellpadding='0' cellspacing='0'" +
             " style='max-width:600px;width:100%;border-radius:16px;" +
             " box-shadow:0 4px 24px rgba(0,0,0,0.09);overflow:hidden;'>" +
-            // Header
+            // ── Header
             "<tr><td style='background:linear-gradient(135deg,#bf360c,#e65c00,#f9a825);" +
             " padding:34px 40px;text-align:center;'>" +
             "<div style='font-size:50px;margin-bottom:10px;'>&#x1F64F;</div>" +
@@ -166,16 +162,15 @@ public class EmailService {
             " letter-spacing:3px;text-transform:uppercase;" +
             " font-family:Arial,sans-serif;'>&#2404; Jay Shri Ram &#2404;</p>" +
             "</td></tr>" +
-            // Body
+            // ── Body
             "<tr><td style='background:#ffffff;padding:38px 40px;'>" +
-            bodyContent +
-            "</td></tr>" +
-            // Divider
+            bodyContent + "</td></tr>" +
+            // ── Divider
             "<tr><td style='background:#fff8f0;padding:16px;text-align:center;" +
             " border-top:1px solid #f0e0cc;border-bottom:1px solid #f0e0cc;'>" +
             "<span style='color:#e65c00;font-size:18px;letter-spacing:8px;'>~ ~ ~</span>" +
             "</td></tr>" +
-            // Footer
+            // ── Footer
             "<tr><td style='background:#1a0a00;padding:26px 40px;text-align:center;'>" +
             "<p style='margin:0 0 5px;color:#f9a825;font-size:12px;font-weight:700;" +
             " letter-spacing:2px;font-family:Arial,sans-serif;'>HANUMAN SANGAM</p>" +
@@ -185,12 +180,11 @@ public class EmailService {
             "<a href='mailto:hanumansangamu@gmail.com'" +
             " style='color:#f9a825;text-decoration:none;'>hanumansangamu@gmail.com</a></p>" +
             "</td></tr>" +
-            "</table></td></tr></table>" +
-            "</body></html>";
+            "</table></td></tr></table></body></html>";
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 1. OTP — REGISTRATION
+    // 1. OTP — Registration
     // ─────────────────────────────────────────────────────────────
 
     public void sendOtp(String toEmail, String otp) {
@@ -208,21 +202,22 @@ public class EmailService {
             "Thank you for joining <strong style='color:#e65c00;'>Hanuman Sangam</strong>! " +
             "Use the OTP below to verify your email and complete your registration.</p>" +
             otpBox(otp) +
-            securityNotice("Hanuman Sangam will <strong>never</strong> ask for your OTP. Do not share it with anyone.") +
+            securityNotice("Hanuman Sangam will <strong>never</strong> ask for your OTP. " +
+                "Do not share it with anyone.") +
             "<p style='margin:0 0 20px;color:#888;font-size:13px;" +
             " font-family:Arial,sans-serif;line-height:1.7;'>" +
             "If you did not request this OTP, please ignore this email safely.</p>" +
             footer();
 
-        send(toEmail, "Hanuman Sangam \u2014 Email Verification Code", html);
+        send(toEmail, "Hanuman Sangam — Email Verification Code", html);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 2. OTP — FORGOT PASSWORD
+    // 2. OTP — Forgot Password
     // ─────────────────────────────────────────────────────────────
 
     public void sendForgotPasswordOtp(String toEmail, String memberName, String otp) {
-        log.info("Sending forgot password OTP to {}", toEmail);
+        log.info("Sending forgot-password OTP to {}", toEmail);
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
             " font-family:Georgia,serif;'>Password Reset Request</h2>" +
@@ -236,17 +231,17 @@ public class EmailService {
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "We received a request to reset your " +
             "<strong style='color:#e65c00;'>Hanuman Sangam</strong> password. " +
-            "Use the OTP below to reset your password.</p>" +
+            "Use the OTP below to proceed.</p>" +
             otpBox(otp) +
             securityNotice("If you did not request a password reset, please ignore this email. " +
                 "Your password will <strong>not</strong> be changed.") +
             footer();
 
-        send(toEmail, "Hanuman Sangam \u2014 Password Reset OTP", html);
+        send(toEmail, "Hanuman Sangam — Password Reset OTP", html);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 3. MEMBERSHIP APPROVED
+    // 3. Membership Approved
     // ─────────────────────────────────────────────────────────────
 
     public void sendApprovalNotification(String toEmail, String memberName) {
@@ -269,16 +264,16 @@ public class EmailService {
             " border:1px solid #a5d6a7;border-radius:14px;" +
             " padding:26px 20px;text-align:center;margin:0 0 26px;'>" +
             "<h3 style='margin:0 0 8px;color:#1b5e20;font-size:19px;" +
-            " font-family:Georgia,serif;'>You are officially a Member!</h3>" +
+            " font-family:Georgia,serif;'>&#x1F64F; You are officially a Member!</h3>" +
             "<p style='margin:0;color:#388e3c;font-size:14px;font-family:Arial,sans-serif;'>" +
             "Your account is now active and ready to use.</p></div>" +
             footer();
 
-        send(toEmail, "Membership Approved \u2014 Welcome to Hanuman Sangam!", html);
+        send(toEmail, "Membership Approved — Welcome to Hanuman Sangam!", html);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 4. MEMBERSHIP REJECTED
+    // 4. Membership Rejected
     // ─────────────────────────────────────────────────────────────
 
     public void sendRejectionNotification(String toEmail, String memberName) {
@@ -296,16 +291,16 @@ public class EmailService {
             " line-height:1.8;font-family:Arial,sans-serif;'>" +
             "After careful review, your membership request has " +
             "<strong style='color:#c62828;'>not been approved</strong> at this time. " +
-            "Please contact admin at " +
+            "Please contact our admin at " +
             "<a href='mailto:hanumansangamu@gmail.com' style='color:#e65c00;'>" +
             "hanumansangamu@gmail.com</a> for clarification.</p>" +
             footer();
 
-        send(toEmail, "Membership Status Update \u2014 Hanuman Sangam", html);
+        send(toEmail, "Membership Status Update — Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 5. ANNOUNCEMENT
+    // 5. Announcement
     // ─────────────────────────────────────────────────────────────
 
     public void sendAnnouncementEmail(String toEmail, String memberName,
@@ -327,20 +322,19 @@ public class EmailService {
             escapeHtml(announcementBody) + "</div></div>" +
             footer();
 
-        send(toEmail, escapeHtml(title) + " \u2014 Hanuman Sangam", html);
+        send(toEmail, escapeHtml(title) + " — Hanuman Sangam", html);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 6. CONTACT → ADMIN
+    // 6. Contact → Admin
     // ─────────────────────────────────────────────────────────────
 
     public void sendContactMessageToAdmin(String memberName, String memberEmail,
                                           String memberPhone, String message) {
         log.info("Sending contact message from {} to admin", memberName);
-
         String safeEmail = isBlank(memberEmail) ? "Not provided" : memberEmail;
         String safePhone = isBlank(memberPhone) ? "Not provided" : memberPhone;
-        String replyTo   = isBlank(memberEmail) ? adminEmail : memberEmail;
+        String replyTo   = isBlank(memberEmail) ? adminEmail   : memberEmail;
 
         String html =
             "<h2 style='margin:0 0 4px;color:#e65c00;font-size:21px;" +
@@ -363,11 +357,13 @@ public class EmailService {
             escapeHtml(message) + "</p></div>" +
             footer();
 
-        send(adminEmail, "Contact from " + escapeHtml(memberName) + " \u2014 Hanuman Sangam", html, replyTo);
+        send(adminEmail,
+             "Contact from " + escapeHtml(memberName) + " — Hanuman Sangam",
+             html, replyTo);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // SHARED HTML HELPERS
+    // HTML HELPERS
     // ─────────────────────────────────────────────────────────────
 
     private String otpBox(String otp) {
@@ -381,7 +377,7 @@ public class EmailService {
             " letter-spacing:14px;font-family:\"Courier New\",monospace;margin:6px 0;'>" +
             escapeHtml(otp) + "</div>" +
             "<p style='margin:10px 0 0;color:#999;font-size:12px;font-family:Arial,sans-serif;'>" +
-            "Valid for <strong>5 minutes</strong> only \u2014 do not share</p>" +
+            "Valid for <strong>5 minutes</strong> only — do not share</p>" +
             "</div>";
     }
 
@@ -417,5 +413,9 @@ public class EmailService {
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace("\"", "&quot;");
+    }
+
+    private boolean isBlank(String s) {
+        return s == null || s.isBlank();
     }
 }

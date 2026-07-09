@@ -39,7 +39,9 @@ public class AuthService {
     private static final SecureRandom SECURE_RANDOM        = new SecureRandom();
     private static final int          OTP_COOLDOWN_SECONDS = 60;
 
-    private final Map<String, LocalDateTime> otpCooldown = new ConcurrentHashMap<>();
+    private final Map<String, LocalDateTime> otpCooldown    = new ConcurrentHashMap<>();
+    // Tracks emails that have completed forgot-password OTP verification
+    private final Map<String, Boolean>       fpVerified      = new ConcurrentHashMap<>();
 
     public AuthService(MemberRepository memberRepository,
                        OtpStoreRepository otpStoreRepository,
@@ -291,6 +293,8 @@ public class AuthService {
 
         store.setVerified(true);
         otpStoreRepository.save(store);
+        // Mark in-memory so resetPassword can verify without DB query issues
+        fpVerified.put(email, true);
         return "OTP verified. You can now reset your password.";
     }
 
@@ -309,13 +313,10 @@ public class AuthService {
                 .orElseThrow(() -> new RuntimeException(
                         "No account found with this email address."));
 
-        OtpStore store = otpStoreRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException(
-                        "Please verify OTP first."));
-
-        if (!store.isVerified())
+        // Check in-memory verified flag (avoids Supabase pooler issues)
+        if (!Boolean.TRUE.equals(fpVerified.get(email)))
             throw new RuntimeException(
-                    "OTP not verified. Please verify OTP first.");
+                    "Please verify OTP first before resetting password.");
 
         if (newPassword == null || newPassword.length() < 8)
             throw new RuntimeException(
@@ -324,8 +325,10 @@ public class AuthService {
         member.setPassword(passwordEncoder.encode(newPassword));
         memberRepository.save(member);
 
-        otpStoreRepository.deleteByEmail(email);
+        // Cleanup
+        fpVerified.remove(email);
         otpCooldown.remove("fp_" + email);
+        try { otpStoreRepository.deleteByEmail(email); } catch (Exception ignored) {}
         return "Password reset successfully! You can now login with your new password.";
     }
 

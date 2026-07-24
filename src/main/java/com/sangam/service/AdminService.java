@@ -2,6 +2,7 @@ package com.sangam.service;
 
 import com.sangam.dto.AdminUpdateMemberRequest;
 import com.sangam.dto.PaymentRequest;
+import com.sangam.dto.StatsUpdateRequest;
 import com.sangam.entity.Announcement;
 import com.sangam.entity.Member;
 import com.sangam.entity.Payment;
@@ -24,22 +25,25 @@ public class AdminService {
     private final PaymentRepository      paymentRepository;
     private final AnnouncementRepository announcementRepository;
     private final EmailService           emailService;
+    private final DashboardStatsService  statsService;
 
     public AdminService(MemberRepository memberRepository,
                         PaymentRepository paymentRepository,
                         AnnouncementRepository announcementRepository,
-                        EmailService emailService) {
+                        EmailService emailService,
+                        DashboardStatsService statsService) {
         this.memberRepository       = memberRepository;
         this.paymentRepository      = paymentRepository;
         this.announcementRepository = announcementRepository;
         this.emailService           = emailService;
+        this.statsService           = statsService;
     }
 
-    // ── Member Management ────────────────────────────────────────────────────
+    // ── Member Management ─────────────────────────────────────────
 
-    public List<Member> getAllMembers()    { return memberRepository.findAll(); }
+    public List<Member> getAllMembers()      { return memberRepository.findAll(); }
     public List<Member> getPendingMembers()  { return memberRepository.findByStatus(Member.Status.PENDING); }
-    public List<Member> getApprovedMembers() { return memberRepository.findByStatus(Member.Status.APPROVED); }
+    public List<Member> getApprovedMembers(){ return memberRepository.findByStatus(Member.Status.APPROVED); }
 
     @Transactional
     public Member approveMember(Long memberId) {
@@ -47,6 +51,8 @@ public class AdminService {
         member.setStatus(Member.Status.APPROVED);
         member.setApprovedAt(LocalDateTime.now());
         memberRepository.save(member);
+        // Auto-update stats when member count changes
+        autoUpdateStats();
         try { emailService.sendApprovalNotification(member.getEmail(), member.getName()); }
         catch (Exception ignored) {}
         return member;
@@ -57,6 +63,8 @@ public class AdminService {
         Member member = findMember(memberId);
         member.setStatus(Member.Status.REJECTED);
         memberRepository.save(member);
+        // Auto-update stats
+        autoUpdateStats();
         try { emailService.sendRejectionNotification(member.getEmail(), member.getName()); }
         catch (Exception ignored) {}
         return member;
@@ -65,6 +73,8 @@ public class AdminService {
     @Transactional
     public void deleteMember(Long memberId) {
         memberRepository.delete(findMember(memberId));
+        // Auto-update stats after delete
+        autoUpdateStats();
     }
 
     @Transactional
@@ -77,7 +87,7 @@ public class AdminService {
         return memberRepository.save(member);
     }
 
-    // ── Payment Management ───────────────────────────────────────────────────
+    // ── Payment Management ────────────────────────────────────────
 
     @Transactional
     public Payment addPayment(Long memberId, PaymentRequest req) {
@@ -87,7 +97,6 @@ public class AdminService {
         Payment.Operation     op     = req.getOperation();
         Payment.PaymentStatus status = req.getPaymentStatus();
 
-        // FIX: SUBTRACT properly reduces member totals (clamped at 0)
         if (op == Payment.Operation.ADD) {
             if (status == Payment.PaymentStatus.PAID) {
                 member.setTotalPaid(member.getTotalPaid() + amount);
@@ -101,6 +110,7 @@ public class AdminService {
                 member.setTotalPending(Math.max(0, member.getTotalPending() - amount));
             }
         }
+
         member.setLastPaymentNote(req.getNote());
         member.setLastPaymentDate(LocalDateTime.now());
         memberRepository.save(member);
@@ -112,26 +122,55 @@ public class AdminService {
         payment.setOperation(op);
         payment.setNote(req.getNote());
         payment.setPaymentDate(LocalDateTime.now());
-        return paymentRepository.save(payment);
+        paymentRepository.save(payment);
+
+        // ✅ Auto-update DashboardStats after every payment
+        // This makes home page + member dashboard reflect changes instantly
+        autoUpdateStats();
+
+        return payment;
     }
 
-    public List<Payment> getAllPayments()                       { return paymentRepository.findAllByOrderByPaymentDateDesc(); }
-    public List<Payment> getPaymentsByMember(Long memberId)    { return paymentRepository.findByMemberId(memberId); }
+    public List<Payment> getAllPayments()                    { return paymentRepository.findAllByOrderByPaymentDateDesc(); }
+    public List<Payment> getPaymentsByMember(Long memberId) { return paymentRepository.findByMemberId(memberId); }
 
     @Transactional
-    public void deletePayment(Long paymentId)                  { paymentRepository.deleteById(paymentId); }
+    public void deletePayment(Long paymentId) {
+        paymentRepository.deleteById(paymentId);
+        // Auto-update stats after payment delete too
+        autoUpdateStats();
+    }
 
-    // ── Dashboard Stats ──────────────────────────────────────────────────────
+    // ── Auto Stats Update (called after every payment/approval) ──
 
     /**
-     * FIX: Dashboard now reads paid/pending directly from member.totalPaid
-     * and member.totalPending — these are correctly updated by addPayment()
-     * including SUBTRACT operations.
-     *
-     * Previous approach summed all Payment rows which couldn't account for
-     * SUBTRACT — both ADD and SUBTRACT rows had PAID/UNPAID status so they
-     * both added to the total instead of one subtracting.
+     * Automatically recalculates and saves DashboardStats
+     * from live member data after any payment or approval change.
+     * This ensures home page (/admin/stats) and member dashboard
+     * always show real-time values without manual "Save" click.
      */
+    private void autoUpdateStats() {
+        try {
+            List<Member> approved = memberRepository.findByStatus(Member.Status.APPROVED);
+            List<Member> pending  = memberRepository.findByStatus(Member.Status.PENDING);
+
+            double totalPaid    = approved.stream().mapToDouble(m -> m.getTotalPaid()    != null ? m.getTotalPaid()    : 0).sum();
+            double totalPending = approved.stream().mapToDouble(m -> m.getTotalPending() != null ? m.getTotalPending() : 0).sum();
+
+            StatsUpdateRequest req = new StatsUpdateRequest();
+            req.setAutoCalculate(true);
+            req.setTotalCollection(totalPaid + totalPending);
+            req.setTotalPaid(totalPaid);
+            req.setTotalUnpaid(totalPending);
+            req.setTotalPendingMembers(pending.size());
+            statsService.updateStats(req);
+        } catch (Exception ignored) {
+            // Silent — don't break payment flow if stats update fails
+        }
+    }
+
+    // ── Dashboard Stats ───────────────────────────────────────────
+
     public Map<String, Object> getDashboardStats(String month) {
         List<Member> approvedMembers = memberRepository.findByStatus(Member.Status.APPROVED);
         List<Member> pendingMembers  = memberRepository.findByStatus(Member.Status.PENDING);
@@ -141,7 +180,6 @@ public class AdminService {
         double totalPendingAll = 0;
 
         for (Member m : approvedMembers) {
-            // Read directly from member totals — correctly reflect ADD and SUBTRACT
             double paid    = m.getTotalPaid();
             double pending = m.getTotalPending();
             totalPaidAll    += paid;
@@ -154,6 +192,8 @@ public class AdminService {
             row.put("paid",    paid);
             row.put("pending", pending);
             row.put("contact", m.getPhoneNumber());
+            row.put("status",  m.getStatus());
+            row.put("address", m.getAddress());
             memberRows.add(row);
         }
 
@@ -165,7 +205,7 @@ public class AdminService {
         return stats;
     }
 
-    // ── Announcements ────────────────────────────────────────────────────────
+    // ── Announcements ─────────────────────────────────────────────
 
     @Transactional
     public Announcement sendAnnouncement(String title, String message) {
@@ -173,7 +213,6 @@ public class AdminService {
         ann.setTitle(title);
         ann.setMessage(message);
         announcementRepository.save(ann);
-
         memberRepository.findByStatus(Member.Status.APPROVED).forEach(m -> {
             try { emailService.sendAnnouncementEmail(m.getEmail(), m.getName(), title, message); }
             catch (Exception ignored) {}
@@ -181,7 +220,9 @@ public class AdminService {
         return ann;
     }
 
-    public List<Announcement> getAllAnnouncements() { return announcementRepository.findAllByOrderByCreatedAtDesc(); }
+    public List<Announcement> getAllAnnouncements() {
+        return announcementRepository.findAllByOrderByCreatedAtDesc();
+    }
 
     @Transactional
     public void deleteAnnouncement(Long id) { announcementRepository.deleteById(id); }

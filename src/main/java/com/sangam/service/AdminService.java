@@ -3,6 +3,7 @@ package com.sangam.service;
 import com.sangam.dto.AdminUpdateMemberRequest;
 import com.sangam.dto.PaymentRequest;
 import com.sangam.dto.StatsUpdateRequest;
+import com.sangam.dto.StatsUpdateRequest;
 import com.sangam.entity.Announcement;
 import com.sangam.entity.Member;
 import com.sangam.entity.Payment;
@@ -151,18 +152,10 @@ public class AdminService {
      */
     private void autoUpdateStats() {
         try {
-            List<Member> approved = memberRepository.findByStatus(Member.Status.APPROVED);
-            List<Member> pending  = memberRepository.findByStatus(Member.Status.PENDING);
-
-            double totalPaid    = approved.stream().mapToDouble(m -> m.getTotalPaid()    != null ? m.getTotalPaid()    : 0).sum();
-            double totalPending = approved.stream().mapToDouble(m -> m.getTotalPending() != null ? m.getTotalPending() : 0).sum();
-
+            // Just pass autoCalculate=true — DashboardStatsService
+            // uses memberRepository.sumTotalPaidApproved() internally
             StatsUpdateRequest req = new StatsUpdateRequest();
             req.setAutoCalculate(true);
-            req.setTotalCollection(totalPaid + totalPending);
-            req.setTotalPaid(totalPaid);
-            req.setTotalUnpaid(totalPending);
-            req.setTotalPendingMembers(pending.size());
             statsService.updateStats(req);
         } catch (Exception ignored) {
             // Silent — don't break payment flow if stats update fails
